@@ -1,0 +1,11 @@
+Package: com.yourname.wechatmoments
+Name: 微信朋友圈入口
+Version: 1.0.0~beta1
+Architecture: iphoneos-arm
+Description: 微信朋友圈入口
+Maintainer: YourName
+Author: YourName
+Section: tweak
+Depends: mobilesubstrate
+Icon: https://github.com/yourname/wechatmoments/icon/wechatmoments.png
+Sileodepiction: https://github.com/yourname/wechatmoments/sileodepiction/wechatmoments/js.json
