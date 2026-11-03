@@ -17,7 +17,7 @@ jobs:
       
       - name: Install Theos
         run: |
-          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | sh
+          sudo curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | sh
       
       - name: Download iOS SDKs
         run: |
@@ -39,7 +39,8 @@ jobs:
       
       - name: Build package
         run: |
-          cd /var/minis/workspace/wechatmoments
+          cd $THEOS
+          make -C . clean
           make package
       
       - name: Upload deb package
@@ -47,5 +48,5 @@ jobs:
         with:
           name: AxsWeChatMoments-deb
           path: |
-            /var/minis/workspace/wechatmoments/*.deb
-            /var/minis/workspace/wechatmoments/*.deb.dSYM/
+            $THEOS/local/debs/*/AxsWeChatMoments_*.deb
+            $THEOS/local/debs/*/AxsWeChatMoments_*.deb.dSYM/
