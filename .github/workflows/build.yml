@@ -17,7 +17,9 @@ jobs:
       
       - name: Install Theos
         run: |
-          sudo curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | sh
+          mkdir -p /opt/theos
+          cd /opt/theos
+          git clone --depth 1 https://github.com/theos/theos.git .
       
       - name: Download iOS SDKs
         run: |
