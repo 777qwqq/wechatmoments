@@ -85,11 +85,27 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 /*
- * 一次完整的清除尝试，最多三轮（间隔 1.2s）。
+ * 退出前的最后一次原生结算。
+ * 朋友圈在用户浏览期间会断断续续回调 onMarkWCObjectAsRead:，
+ * 离开时再让发现页按当前状态重算一次，确保它把"已读到哪"写下去。
+ */
+- (void)momentsTimelineWillDisappear {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+    if (!discover) return;
+
+    BOOL asked = wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
+    WQMLog(@"settle before exit: onTimeLineViewReturn=%d", asked);
+}
+
+/*
+ * 走微信自己的结算，不自己算数字。
  *
- * 为什么要重试：朋友圈自己的"已读上报"是网络请求，落库到红点汇总有延迟。
- * 第一次清完之后，服务端可能把旧的汇总推回来，红点会闪一下又出现；
- * 再补一次就能压住，而且一旦读到"没有红点"就立刻停，不会无限重清。
+ * 前提（WQMMomentsRouter 已经做好）：timeline.delegate = 发现页、发现页 m_inTimeline = YES。
+ * 有了这两样，朋友圈加载完数据后会自己回调 onMarkWCObjectAsRead:，
+ * 发现页据此把"已读位置"落到本地存储 —— 所以冷启动不会再回来。
+ *
+ * 这里只负责"催一下"：如果朋友圈的异步回调还没到，就用发现页自己的
+ * onTimeLineViewReturn 让它按当前状态重算一次；再不行才动显示层。
  */
 - (void)runBadgeClearAttempt {
     if (self.clearAttempts >= 3) {
@@ -101,34 +117,23 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     [bridge refresh];
 
-    /*
-     * 注意：不能只看 badgeString / badgeValue。
-     * 微信底栏的"发现"红点绝大多数时候是一个没有数字的小圆点，
-     * 两个字段都是空的，但 badgeView 显示着。
-     */
     if (![bridge discoverBadgeVisible]) {
         WQMLog(@"discover badge not visible (attempt %ld)", (long)self.clearAttempts);
         return;
     }
 
     int before = (int)MAX(0LL, [bridge discoverUnreadCount]);
-    WQMLog(@"discover badge visible (unread %d), attempt %ld",
-           before, (long)self.clearAttempts);
+    [self openLedgerFrom:before];
 
-    /*
-     * 一级：走微信自己的"从朋友圈返回"。
-     * 发现页的 onTimeLineViewReturn 就是这条链路的官方回调：清掉朋友圈这一项，
-     * 再按剩下的子项重算汇总，所以视频号 / 直播的未读会被原样保留。
-     */
     UIViewController *discover = [bridge discoverController];
     BOOL asked = wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
-    if (asked) [self openLedgerFrom:before];
-    WQMLog(@"asked WeChat to settle moments return (%d), discover page %@",
-           asked, discover ? NSStringFromClass(discover.class) : @"nil");
+    WQMLog(@"native settle #%ld: onTimeLineViewReturn=%d (discover %@, unread %d)",
+           (long)self.clearAttempts, asked,
+           discover ? NSStringFromClass(discover.class) : @"nil", before);
 
     __weak typeof(self) weakSelf = self;
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
@@ -138,13 +143,14 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
         }
 
         /*
-         * 二级：只关掉发现页上"朋友圈红点"这一个开关（isShowingMomentsRedDot），
-         * 其它子项一概不碰，然后请微信按现有子项重算汇总。
+         * 朋友圈的已读回调是异步的（要等数据落地）。
+         * 第二轮不再重复催 onTimeLineViewReturn，而是把发现页上"朋友圈红点"
+         * 这一个开关关掉，再让它按剩余子项重算 —— 视频号 / 直播的未读不动。
          */
         BOOL flagged = [self clearMomentsDotOnDiscoverPage];
         BOOL recomputed = [self requestAggregateRecompute];
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
             if (!self) return;
@@ -153,29 +159,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
                        flagged, recomputed);
                 return;
             }
-
-            /*
-             * 三级：显示层清除。
-             * 数字红点走保守扣减（只减朋友圈那一份），
-             * 纯小圆点没有数量可分，直接调微信自己的"移除该 tab 红点"。
-             */
-            WQMTabBarBridge *bar = [WQMTabBarBridge shared];
-            if ([bar discoverBadgeString].length > 0) {
-                NSInteger momentsUnread = -1;
-                if (![self readMomentsUnreadFrom:self.timelineController outValue:&momentsUnread]) {
-                    momentsUnread = -1;
-                }
-                WQMBadgeInput input = { before, (int)momentsUnread };
-                int target = wqm_badge_total_after_moments_read(input);
-                [self applyTotal:target
-                          toItem:bar.discoverItem
-                        previous:before
-                         moments:momentsUnread];
-            } else {
-                [self removeDiscoverRedDot:before];
-            }
-
-            if ([[WQMTabBarBridge shared] discoverBadgeVisible] && self.clearAttempts < 3) {
+            if (self.clearAttempts < 3) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                              (int64_t)(1.2 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{

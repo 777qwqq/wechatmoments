@@ -46,7 +46,10 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 @property (nonatomic, strong) UIViewController *momentsController;
 @property (nonatomic, strong) Class resolvedClass;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *edgePan;
-@property (nonatomic, strong) UIButton *floatingBackButton;
+/* 进入前发现页的原始状态，退出时原样还回去。 */
+@property (nonatomic) BOOL discoverInTimelineBefore;
+@property (nonatomic) BOOL hasDiscoverInTimelineSnapshot;
+@property (nonatomic, weak) id previousMomentsDelegate;
 @end
 
 @implementation WQMMomentsRouter
@@ -122,6 +125,16 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     self.showing = YES;
     self.badgeClearedForSession = NO;
 
+    /*
+     * 关键：先把朋友圈接回发现页。
+     * 微信判断"朋友圈已读 / 该不该清发现页红点"看两样东西：
+     *   1. timeline.delegate 是不是发现页（发现页实现了 onMarkWCObjectAsRead: 等回调）
+     *   2. 发现页的 m_inTimeline 是否为 YES
+     * 我们自己 alloc 出来的实例两者都是空的，微信的已读结算整条链路就被跳过了，
+     * 表现就是"红点当场压下去、冷启动又回来"。这里补上，后续全交给微信自己。
+     */
+    [self attachMomentsToDiscoverPage];
+
     [self configureNavigationBarOf:navigationController];
     [self installBackSwipeOn:navigationController.view];
     [bridge setTabBarHidden:YES];
@@ -174,9 +187,8 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
  * 朋友圈自己会在 viewDidLoad / viewWillAppear 里整理 navigationItem，
  * 我们提前塞的返回箭头可能被它清掉，所以出现之后再补一次（已有就不覆盖）。
  *
- * 还有个更常见的情况：朋友圈会把自己的导航栏藏起来（它自己画顶部）。
- * 这时 leftBarButtonItem 没有人画出来，等于没有返回按钮 ——
- * 所以退回到"自己贴一个悬浮箭头"，不依赖导航栏是否可见。
+ * 导航栏被朋友圈藏掉时不补任何东西：原生朋友圈没有可见返回键，
+ * 返回交给左缘侧滑，多一个悬浮箭头反而和原生不一致。
  */
 - (void)ensureBackButton {
     UIViewController *timeline = self.momentsController;
@@ -184,10 +196,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     if (!timeline || !navigation) return;
     if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
 
-    if (navigation.navigationBarHidden) {
-        [self installFloatingBackButton];
-        return;
-    }
+    if (navigation.navigationBarHidden) return;
     if (timeline.navigationItem.leftBarButtonItem) return;
 
     UIBarButtonItem *back =
@@ -199,59 +208,73 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     timeline.navigationItem.leftBarButtonItem = back;
 }
 
-/*
- * 悬浮返回箭头：44x44 的点击区，左上角，压在内容之上。
- * 朋友圈的封面图会透到状态栏下面，所以这里带一点阴影，白箭头才看得清。
- */
-- (void)installFloatingBackButton {
-    UINavigationController *navigation = self.hostNavigation;
-    UIView *host = navigation.view;
-    if (!host) return;
+#pragma mark - 接回发现页（原生红点链路）
 
-    if (self.floatingBackButton && self.floatingBackButton.superview == host) {
-        [host bringSubviewToFront:self.floatingBackButton];
+/*
+ * m_inTimeline 是发现页的私有 ivar（_Bool）。用 runtime 直接读写，
+ * 不走 KVC，避免微信哪天改了属性可见性抛异常。
+ */
+static BOOL *wqm_in_timeline_slot(id discover) {
+    if (!discover) return NULL;
+    Ivar ivar = class_getInstanceVariable(object_getClass(discover), "m_inTimeline");
+    if (!ivar) return NULL;
+    return (BOOL *)((char *)(__bridge void *)discover + ivar_getOffset(ivar));
+}
+
+- (void)attachMomentsToDiscoverPage {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+    if (!discover) {
+        WQMLog(@"discover page unavailable; moments runs standalone, badge stays native");
         return;
     }
 
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-    button.frame = [self floatingBackButtonFrame];
-    button.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
-    button.accessibilityLabel = @"返回";
-    [button setImage:wqm_chevron_image(26.0, 2.4) forState:UIControlStateNormal];
-    button.imageView.contentMode = UIViewContentModeCenter;
-    button.layer.shadowColor = [UIColor blackColor].CGColor;
-    button.layer.shadowOpacity = 0.35f;
-    button.layer.shadowRadius = 3.0;
-    button.layer.shadowOffset = CGSizeMake(0, 1);
-    [button addTarget:self action:@selector(handleBackButton) forControlEvents:UIControlEventTouchUpInside];
-
-    [host addSubview:button];
-    [host bringSubviewToFront:button];
-    self.floatingBackButton = button;
-    WQMLog(@"installed floating back button (nav bar hidden)");
-}
-
-- (CGRect)floatingBackButtonFrame {
-    CGFloat top = 20.0;
-    if (@available(iOS 11.0, *)) {
-        top = self.hostNavigation.view.safeAreaInsets.top;
+    /* delegate 是 weak，发现页活着就不会出事。先记住原值，退出时还原。 */
+    @try {
+        self.previousMomentsDelegate = [self.momentsController valueForKey:@"delegate"];
+    } @catch (NSException *exception) {
+        self.previousMomentsDelegate = nil;
     }
-    if (top <= 0) top = 44.0;
-    return CGRectMake(6.0, top + 2.0, 44.0, 44.0);
+    @try {
+        [self.momentsController setValue:discover forKey:@"delegate"];
+        WQMLog(@"moments delegate -> %@ (was %@)", NSStringFromClass(discover.class),
+               self.previousMomentsDelegate ? NSStringFromClass([self.previousMomentsDelegate class]) : @"nil");
+    } @catch (NSException *exception) {
+        WQMLog(@"bind moments delegate failed: %@", exception.reason);
+    }
+
+    BOOL *slot = wqm_in_timeline_slot(discover);
+    if (slot) {
+        self.discoverInTimelineBefore = *slot;
+        self.hasDiscoverInTimelineSnapshot = YES;
+        *slot = YES;
+        WQMLog(@"discover m_inTimeline %d -> 1", self.discoverInTimelineBefore);
+    } else {
+        self.hasDiscoverInTimelineSnapshot = NO;
+        WQMLog(@"discover has no m_inTimeline ivar");
+    }
 }
 
+- (void)detachMomentsFromDiscoverPage {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+
+    @try {
+        [self.momentsController setValue:self.previousMomentsDelegate forKey:@"delegate"];
+    } @catch (NSException *exception) {
+        /* 已经销毁就算了 */
+    }
+    self.previousMomentsDelegate = nil;
+
+    if (discover && self.hasDiscoverInTimelineSnapshot) {
+        BOOL *slot = wqm_in_timeline_slot(discover);
+        if (slot) *slot = self.discoverInTimelineBefore;
+    }
+    self.hasDiscoverInTimelineSnapshot = NO;
+}
+
+/* 微信改过导航栏可见性之后，重新确认一次返回项（导航栏可见时才有）。 */
 - (void)refreshChrome {
     if (!self.showing) return;
     [self ensureBackButton];
-    if (self.floatingBackButton) {
-        self.floatingBackButton.frame = [self floatingBackButtonFrame];
-        [self.hostNavigation.view bringSubviewToFront:self.floatingBackButton];
-    }
-}
-
-- (void)removeFloatingBackButton {
-    [self.floatingBackButton removeFromSuperview];
-    self.floatingBackButton = nil;
 }
 
 - (void)installBackSwipeOn:(UIView *)view {
@@ -381,7 +404,12 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
         [self.edgePan.view removeGestureRecognizer:self.edgePan];
         self.edgePan = nil;
     }
-    [self removeFloatingBackButton];
+    /*
+     * 先让微信把这一轮"已读到哪"结算掉，再断开 delegate。
+     * 顺序反了的话，onTimeLineViewReturn 会因为 m_inTimeline 已复位而空转。
+     */
+    [[WQMBadgeCoordinator shared] momentsTimelineWillDisappear];
+    [self detachMomentsFromDiscoverPage];
 
     /*
      * 真正撤视图、还把底栏还原：只在动画结束后做。
@@ -467,11 +495,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     /* 保留接口：真机诊断时可以用来观察朋友圈内部的导航行为。 */
     if (!self.showing || navigationController != self.hostNavigation) return;
     if (!viewController) return;
-
-    /* 二级页面会把新视图铺上来，悬浮箭头要重新提到最上面。 */
-    if (self.floatingBackButton) {
-        [navigationController.view bringSubviewToFront:self.floatingBackButton];
-    }
 
     WQMLog(@"moments push -> %@ (stack %lu)",
            NSStringFromClass(viewController.class),
