@@ -16,6 +16,10 @@
  *   - up 时若时钟已越过阈值但定时器被主线程卡住没跑，仍判定为长按（以真实按住时长为准）。
  */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     WQMPressPhaseIdle = 0,
     WQMPressPhasePending,   /* 手指按下，等待判定 */
@@ -55,3 +59,7 @@ WQMPressOutcome wqm_press_up(WQMPressMachine *machine, double now);
 WQMPressOutcome wqm_press_cancel(WQMPressMachine *machine);
 
 void wqm_press_reset(WQMPressMachine *machine);
+
+#ifdef __cplusplus
+}
+#endif

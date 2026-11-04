@@ -10,6 +10,10 @@
  *   3) 用短时窗口拦住服务端回灌的陈旧汇总值。
  */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int currentTotal;   /* 当前 tab 汇总未读，>= 0 */
     int momentsUnread;  /* 朋友圈未读；未知时传 -1 */
@@ -33,3 +37,7 @@ void wqm_badge_ledger_open(WQMBadgeLedger *ledger, int totalBefore, double now, 
 
 /* 返回 1 表示这条 badge 更新属于陈旧回灌，应丢弃。 */
 int wqm_badge_ledger_should_drop(WQMBadgeLedger *ledger, int incomingTotal, double now);
+
+#ifdef __cplusplus
+}
+#endif
