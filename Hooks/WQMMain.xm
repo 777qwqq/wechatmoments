@@ -17,6 +17,8 @@
 /* 微信自己的导航控制器，朋友圈内部可能用它退出。 */
 @interface MMUINavigationController : UINavigationController
 - (void)disMissSelf;
+- (id)popViewControllerAnimated:(BOOL)animated;
+- (id)DispatchPopViewControllerAnimated:(BOOL)animated;
 @end
 
 /* 返回 YES 表示这次选中已被我们处理，调用方不要再执行 %orig。 */
@@ -93,6 +95,39 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
         return;
     }
     %orig;
+}
+
+/*
+ * 关键：MMUINavigationController **自己实现了** popViewControllerAnimated:，
+ * 所以 %hook UINavigationController 的那份对朋友圈完全无效 ——
+ * 朋友圈顶栏自带的返回箭头调的就是这里，之前点了没反应就是这个原因。
+ * 栈里只剩时间线时把这次 pop 转成"退出朋友圈"。
+ */
+- (id)popViewControllerAnimated:(BOOL)animated {
+    WQMMomentsRouter *router = [WQMMomentsRouter shared];
+    if ([router ownsNavigationController:self] && self.viewControllers.count <= 1) {
+        [router exitAnimated:animated reason:@"pop-timeline-root(wechat)"];
+        return nil;
+    }
+    return %orig;
+}
+
+- (id)DispatchPopViewControllerAnimated:(BOOL)animated {
+    WQMMomentsRouter *router = [WQMMomentsRouter shared];
+    if ([router ownsNavigationController:self] && self.viewControllers.count <= 1) {
+        [router exitAnimated:animated reason:@"dispatch-pop-timeline-root"];
+        return nil;
+    }
+    return %orig;
+}
+
+/* 朋友圈常用这一手把自己的导航栏藏掉：藏了之后 navigationItem 就没人画了。 */
+- (void)setNavigationBarHidden:(BOOL)hidden animated:(BOOL)animated {
+    %orig;
+    WQMMomentsRouter *router = [WQMMomentsRouter shared];
+    if (![router ownsNavigationController:self]) return;
+    WQMLog(@"wechat setNavigationBarHidden:%d", hidden);
+    [router refreshChrome];
 }
 
 %end

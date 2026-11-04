@@ -1,4 +1,5 @@
 #import <objc/runtime.h>
+#import <math.h>
 
 #import "WQMMomentsRouter.h"
 #import "WQMBadgeCoordinator.h"
@@ -35,15 +36,17 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
-@interface WQMMomentsRouter ()
+@interface WQMMomentsRouter () <UIGestureRecognizerDelegate>
 @property (nonatomic, readwrite, getter=isShowing) BOOL showing;
 @property (nonatomic) BOOL exiting;
 @property (nonatomic) BOOL badgeClearedForSession;
+@property (nonatomic) BOOL edgeSwipeTriggered;
 @property (nonatomic, strong) UINavigationController *hostNavigation;
 @property (nonatomic, weak) UITabBarController *hostParent;
 @property (nonatomic, strong) UIViewController *momentsController;
 @property (nonatomic, strong) Class resolvedClass;
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *edgePan;
+@property (nonatomic, strong) UIButton *floatingBackButton;
 @end
 
 @implementation WQMMomentsRouter
@@ -170,12 +173,21 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 /*
  * 朋友圈自己会在 viewDidLoad / viewWillAppear 里整理 navigationItem，
  * 我们提前塞的返回箭头可能被它清掉，所以出现之后再补一次（已有就不覆盖）。
+ *
+ * 还有个更常见的情况：朋友圈会把自己的导航栏藏起来（它自己画顶部）。
+ * 这时 leftBarButtonItem 没有人画出来，等于没有返回按钮 ——
+ * 所以退回到"自己贴一个悬浮箭头"，不依赖导航栏是否可见。
  */
 - (void)ensureBackButton {
     UIViewController *timeline = self.momentsController;
     UINavigationController *navigation = self.hostNavigation;
-    if (!timeline || !navigation || navigation.navigationBarHidden) return;
+    if (!timeline || !navigation) return;
     if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
+
+    if (navigation.navigationBarHidden) {
+        [self installFloatingBackButton];
+        return;
+    }
     if (timeline.navigationItem.leftBarButtonItem) return;
 
     UIBarButtonItem *back =
@@ -187,6 +199,61 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     timeline.navigationItem.leftBarButtonItem = back;
 }
 
+/*
+ * 悬浮返回箭头：44x44 的点击区，左上角，压在内容之上。
+ * 朋友圈的封面图会透到状态栏下面，所以这里带一点阴影，白箭头才看得清。
+ */
+- (void)installFloatingBackButton {
+    UINavigationController *navigation = self.hostNavigation;
+    UIView *host = navigation.view;
+    if (!host) return;
+
+    if (self.floatingBackButton && self.floatingBackButton.superview == host) {
+        [host bringSubviewToFront:self.floatingBackButton];
+        return;
+    }
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    button.frame = [self floatingBackButtonFrame];
+    button.autoresizingMask = UIViewAutoresizingFlexibleRightMargin;
+    button.accessibilityLabel = @"返回";
+    [button setImage:wqm_chevron_image(26.0, 2.4) forState:UIControlStateNormal];
+    button.imageView.contentMode = UIViewContentModeCenter;
+    button.layer.shadowColor = [UIColor blackColor].CGColor;
+    button.layer.shadowOpacity = 0.35f;
+    button.layer.shadowRadius = 3.0;
+    button.layer.shadowOffset = CGSizeMake(0, 1);
+    [button addTarget:self action:@selector(handleBackButton) forControlEvents:UIControlEventTouchUpInside];
+
+    [host addSubview:button];
+    [host bringSubviewToFront:button];
+    self.floatingBackButton = button;
+    WQMLog(@"installed floating back button (nav bar hidden)");
+}
+
+- (CGRect)floatingBackButtonFrame {
+    CGFloat top = 20.0;
+    if (@available(iOS 11.0, *)) {
+        top = self.hostNavigation.view.safeAreaInsets.top;
+    }
+    if (top <= 0) top = 44.0;
+    return CGRectMake(6.0, top + 2.0, 44.0, 44.0);
+}
+
+- (void)refreshChrome {
+    if (!self.showing) return;
+    [self ensureBackButton];
+    if (self.floatingBackButton) {
+        self.floatingBackButton.frame = [self floatingBackButtonFrame];
+        [self.hostNavigation.view bringSubviewToFront:self.floatingBackButton];
+    }
+}
+
+- (void)removeFloatingBackButton {
+    [self.floatingBackButton removeFromSuperview];
+    self.floatingBackButton = nil;
+}
+
 - (void)installBackSwipeOn:(UIView *)view {
     if (!view) return;
     UIScreenEdgePanGestureRecognizer *pan =
@@ -194,20 +261,59 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
                                                           action:@selector(handleEdgePan:)];
     pan.edges = UIRectEdgeLeft;
     pan.maximumNumberOfTouches = 1;
+    /* 不抢触摸：朋友圈里的滚动、点击都照常，我们只是"顺便"看到这次滑动。 */
+    pan.cancelsTouchesInView = NO;
+    pan.delaysTouchesBegan = NO;
+    pan.delegate = self;
     [view addGestureRecognizer:pan];
     self.edgePan = pan;
+    self.edgeSwipeTriggered = NO;
 }
 
-/* 栈里只有时间线首屏时，系统侧滑是禁用的，这里补一条左缘手势。 */
+/*
+ * 微信自己的侧滑返回是 MMUINavigationController 里一套自定义转场，
+ * 而且栈里只剩一个页面时 shouldInteractivePop 会返回 NO，手势直接被关掉。
+ * 所以这里自己判：跟手过 60pt 就退，不要求用户"滑到底再松手"。
+ */
 - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)pan {
-    if (pan.state != UIGestureRecognizerStateEnded) return;
-    if (!self.showing || !self.isAtTimelineRoot) return;
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        self.edgeSwipeTriggered = NO;
+        return;
+    }
+    if (pan.state != UIGestureRecognizerStateChanged) return;
+    if (self.edgeSwipeTriggered || !self.showing) return;
 
     CGPoint translation = [pan translationInView:pan.view];
-    CGPoint velocity = [pan velocityInView:pan.view];
-    if (translation.x > 50.0 || velocity.x > 400.0) {
+    if (translation.x < 60.0) return;
+
+    self.edgeSwipeTriggered = YES;
+    if (self.isAtTimelineRoot) {
         [self exitAnimated:YES reason:@"edge-swipe"];
+        return;
     }
+    /*
+     * 二级页面：交给导航栈自己 pop。正在做转场时不插手，
+     * 否则会和微信的交互式转场抢状态。
+     */
+    if (self.hostNavigation.transitionCoordinator) return;
+    [self.hostNavigation popViewControllerAnimated:YES];
+}
+
+#pragma mark - UIGestureRecognizerDelegate
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != self.edgePan) return YES;
+    if (!self.showing) return NO;
+
+    UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
+    CGPoint velocity = [pan velocityInView:pan.view];
+    /* 只认"向右"的滑动，竖向滚动不参与。 */
+    return velocity.x > 0 && fabs(velocity.x) > fabs(velocity.y);
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return gestureRecognizer == self.edgePan || other == self.edgePan;
 }
 
 - (void)handleBackButton {
@@ -226,8 +332,13 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [weakSelf ensureBackButton];
-        [weakSelf clearBadgeIfNeeded];
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self.showing || !self.hostNavigation) return;
+        WQMLog(@"post-entry chrome: navBarHidden=%d stack=%lu",
+               self.hostNavigation.navigationBarHidden,
+               (unsigned long)self.hostNavigation.viewControllers.count);
+        [self refreshChrome];
+        [self clearBadgeIfNeeded];
     });
 }
 
@@ -270,30 +381,49 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
         [self.edgePan.view removeGestureRecognizer:self.edgePan];
         self.edgePan = nil;
     }
+    [self removeFloatingBackButton];
 
     /*
-     * 顺序：先撤整屏视图（它盖着底栏），再把底栏放回来、把选中态切到"微信"。
-     * 用户看到的是朋友圈直接消失、回到消息主页，中间不会闪一下发现页。
+     * 真正撤视图、还把底栏还原：只在动画结束后做。
+     * 提前做的话，底栏会在朋友圈还在往右滑的时候先冒出来。
      */
-    [navigation willMoveToParentViewController:nil];
+    void (^teardown)(void) = ^{
+        [navigation willMoveToParentViewController:nil];
+        [navigation.view removeFromSuperview];
+        [navigation endAppearanceTransition];
+        [navigation removeFromParentViewController];
+
+        [bridge setTabBarHidden:NO];
+        [bridge forceDiscoverHighlight:NO];
+
+        if (host && host.selectedIndex != bridge.messageIndex) {
+            host.selectedIndex = bridge.messageIndex;
+        }
+
+        self.hostNavigation = nil;
+        self.hostParent = nil;
+        self.momentsController = nil;
+        self.exiting = NO;
+
+        WQMLog(@"exit moments (%@)", reason);
+    };
+
     [navigation beginAppearanceTransition:NO animated:animated];
-    [navigation.view removeFromSuperview];
-    [navigation endAppearanceTransition];
-    [navigation removeFromParentViewController];
 
-    [bridge setTabBarHidden:NO];
-    [bridge forceDiscoverHighlight:NO];
-
-    if (host && host.selectedIndex != bridge.messageIndex) {
-        host.selectedIndex = bridge.messageIndex;
+    if (animated && navigation.view.superview) {
+        [UIView animateWithDuration:0.22
+                              delay:0.0
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            navigation.view.transform =
+                CGAffineTransformMakeTranslation(CGRectGetWidth(navigation.view.bounds), 0);
+        } completion:^(BOOL finished) {
+            teardown();
+        }];
+        return;
     }
 
-    self.hostNavigation = nil;
-    self.hostParent = nil;
-    self.momentsController = nil;
-    self.exiting = NO;
-
-    WQMLog(@"exit moments (%@)", reason);
+    teardown();
 }
 
 - (BOOL)ownsNavigationController:(UINavigationController *)navigationController {
@@ -337,6 +467,12 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     /* 保留接口：真机诊断时可以用来观察朋友圈内部的导航行为。 */
     if (!self.showing || navigationController != self.hostNavigation) return;
     if (!viewController) return;
+
+    /* 二级页面会把新视图铺上来，悬浮箭头要重新提到最上面。 */
+    if (self.floatingBackButton) {
+        [navigationController.view bringSubviewToFront:self.floatingBackButton];
+    }
+
     WQMLog(@"moments push -> %@ (stack %lu)",
            NSStringFromClass(viewController.class),
            (unsigned long)navigationController.viewControllers.count);

@@ -8,6 +8,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
     WQMPressMachine _machine;
     CGPoint _initialPoint;
     NSTimer *_holdTimer;
+    BOOL _longPressFired;
 }
 
 - (instancetype)initWithTarget:(id)target action:(SEL)action {
@@ -51,11 +52,19 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 
     if (!wqm_press_hold_elapsed(&_machine, CACurrentMediaTime())) return;
 
-    /* 立刻吃下这次触摸：底栏收到 touchesCancelled，不会把"发现"选中。 */
-    self.state = UIGestureRecognizerStateBegan;
+    /*
+     * 时间一到就直接跳，不等抬手。
+     *
+     * 抬手会不会误触发现页九宫格？不会：这次触摸在 touchesBegan 时就落给了底栏，
+     * UIKit 不会对进行中的触摸重新做 hit-test，所以手指下面是哪一格都跟它没关系。
+     * 底栏自己的 singleTapGesture 又被我们要求 fail，也不会补一次 tab 切换。
+     */
+    _longPressFired = YES;
+    self.state = UIGestureRecognizerStateEnded;
 
     if (self.onArmed) self.onArmed();
-    WQMLog(@"long press armed, waiting for lift");
+    WQMLog(@"long press");
+    if (self.onLongPress) self.onLongPress();
 }
 
 #pragma mark - Touch handling
@@ -63,6 +72,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     if (self.state != UIGestureRecognizerStatePossible) return;
 
+    _longPressFired = NO;
     UITouch *touch = touches.anyObject;
     if (!touch) return;
 
@@ -114,6 +124,11 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [self stopHoldTimer];
 
+    /* 长按已经在定时器里发过了，这里只收尾，不能再触发一次。 */
+    if (_longPressFired) {
+        return;
+    }
+
     WQMPressOutcome outcome = wqm_press_up(&_machine, CACurrentMediaTime());
 
     switch (outcome) {
@@ -146,6 +161,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [self stopHoldTimer];
     wqm_press_cancel(&_machine);
+    if (_longPressFired) return;
     self.state = (self.state == UIGestureRecognizerStateBegan)
                      ? UIGestureRecognizerStateCancelled
                      : UIGestureRecognizerStateFailed;
@@ -165,6 +181,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
     [self stopHoldTimer];
     wqm_press_reset(&_machine);
     _initialPoint = CGPointZero;
+    _longPressFired = NO;
 }
 
 @end

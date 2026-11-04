@@ -25,7 +25,7 @@
 （`Sources/WQMPressMachine.c`），因此可以脱离真机跑真值表测试。
 
 ```
-down ──► pending ──(计时到)──► held ──(抬手)──► long press
+down ──► pending ──(计时到)──► held ──► long press（立刻跳转）
             │
             └──(抬手，未超时)──► tap
             └──(移出 slop / 多指 / 系统取消)──► abort
@@ -35,11 +35,11 @@ down ──► pending ──(计时到)──► held ──(抬手)──► l
 
 - **`delaysTouchesEnded = YES`**：把底栏自己的 `touchesEnded` 扣住。抬手瞬间本识别器先转 `Began`
   再转 `Ended`，底栏收到的是 `touchesCancelled` 而不是 `touchesEnded` —— 这就是"吞掉 UP"。
-- **长按成立时先不导航**：计时到点只进入 `Began`（视图的触摸被取消）+ 一次触感反馈，
-  真正的跳转推迟到**手指抬起**。这样页面出现时手指已经离开屏幕，
-  抬起位置即使正好落在九宫格某一项上也不会被接管。
+- **长按到点立刻跳转**：不需要松手。抬手会不会误触九宫格？不会——这次触摸在 `touchesBegan`
+  时就落给了底栏，UIKit 不会对**进行中的**触摸重新 hit-test，手指下面压着哪一格都与它无关；
+  底栏自己的 `singleTapGesture` 又被要求等我们失败，也不会补一次 tab 切换。
 - **`WQMTouchShield`**：页面切换动画期间的兜底。在窗口上盖 0.25–0.3s 的透明视图，
-  吞掉残留触摸（例如长按后立刻又补了一下）。
+  吞掉"新按下的"触摸，保证跳转瞬间连点不会穿透到发现页的列表上。
 
 只有触点落在「发现」槽位内识别器才参与竞争，其它槽位在 `touchesBegan` 里直接 `Failed`，
 「微信 / 通讯录 / 我」的手感不受任何影响。
@@ -104,9 +104,18 @@ UITabBarController
 `popViewControllerAnimated:` / `popToRootViewControllerAnimated:` / `dismissViewControllerAnimated:` 三个入口
 都做了 `viewControllers.count <= 1` 判断，二级页面的返回完全不经过这段逻辑。
 
-**返回入口**：原生朋友圈靠导航栏左上角的返回箭头。宿主导航栏默认为**透明**（封面图透到状态栏下面），
-我们在时间线的 `navigationItem` 上补一个白色返回箭头；栈里只有一层时系统侧滑是禁用的，
-所以另外挂了一条左缘 `UIScreenEdgePanGestureRecognizer` 兜底。二级页面走系统自己的返回，不吃这条逻辑。
+> ⚠️ 这里踩过一个坑：**`MMUINavigationController` 自己实现了 `popViewControllerAnimated:`**。
+> `%hook UINavigationController` 装的方法在子类重写之后根本不会被调用，
+> 于是微信朋友圈顶栏自带的返回箭头点了没反应。现在 `%hook MMUINavigationController`
+> 单独接一份（`popViewControllerAnimated:` / `DispatchPopViewControllerAnimated:` / `disMissSelf`）。
+
+**返回入口**有三个，互相兜底：
+
+1. 朋友圈顶栏自带的返回箭头 —— 它调 `popViewControllerAnimated:`，被上面的钩子接住；
+2. 我们自己补的箭头：导航栏可见时塞 `navigationItem.leftBarButtonItem`，
+   **被微信藏掉导航栏时**改成在导航控制器视图上贴一个 44×44 的悬浮箭头（不依赖导航栏是否可见）；
+3. 左缘侧滑：`UIScreenEdgePanGestureRecognizer` + `UIGestureRecognizerDelegate`
+   允许与微信自己的手势并存，跟手 60pt 就退（不要求滑到底再松手），二级页面则转成普通 `pop`。
 
 **底栏选中态**：因为整条底栏在朋友圈期间是隐藏的，不再需要"钉高亮"。
 退出时只做一件事——把 `selectedIndex` 归到「微信」，底栏重新出现时就是消息主页。

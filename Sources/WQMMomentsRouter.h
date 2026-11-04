@@ -33,4 +33,7 @@
       navigationController:(UINavigationController *)navigationController;
 - (void)handleTabSwitchToIndex:(NSUInteger)index;
 
+/* 微信改动了导航栏可见性之后重新摆一次顶栏（返回箭头 / 悬浮箭头）。 */
+- (void)refreshChrome;
+
 @end
