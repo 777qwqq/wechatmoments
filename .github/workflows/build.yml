@@ -17,9 +17,12 @@ jobs:
       
       - name: Install Theos
         run: |
-          brew install theos || (cd /opt/theos && git clone --depth 1 https://github.com/theos/theos.git .)
+          sudo mkdir -p /opt/theos
+          sudo chown $USER:$USER /opt/theos
+          cd /opt/theos
+          git clone --depth 1 https://github.com/theos/theos.git .
       
-      - name: Download iOS SDKs
+      - name: Download iOS SDK
         run: |
           cd /opt/theos/sdks
           curl -L -o iPhoneOS16.5.sdk.tar.xz \
