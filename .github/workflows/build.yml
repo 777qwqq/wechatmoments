@@ -1,47 +1,99 @@
 name: Build WeChat Moments Tweak
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+  THEOS: ${{ github.workspace }}/theos
 
 jobs:
   build:
-    runs-on: macos-latest
-    
+    name: Build (${{ matrix.build_variant }})
+    runs-on: macos-14
+    outputs:
+      package_version: ${{ steps.bump.outputs.package_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_variant: rootless
+
     steps:
-      - name: Checkout code
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Install Theos
+
+      - name: Setup Environment
         run: |
-          sudo mkdir -p /opt/theos
-          sudo chown $USER:$USER /opt/theos
-          cd /opt/theos
-          git clone --depth 1 https://github.com/theos/theos.git .
-      
-      - name: Download iOS SDK
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> $HOME/.theosrc
+
+      - name: Bump Package Version
+        id: bump
         run: |
-          cd /opt/theos/sdks
-          curl -L -o iPhoneOS16.5.sdk.tar.xz \
-            "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
-          tar -xf iPhoneOS16.5.sdk.tar.xz
-      
-      - name: Update Theos submodules
+          VERSION="1.0.0-${{ github.run_number }}"
+          echo "Using version: $VERSION"
+          sed -i '' "s/^Version: .*/Version: ${VERSION}/" control
+          echo "package_version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+
+      - name: Install iOS SDK
         run: |
-          cd /opt/theos
-          git submodule update --init vendor
-      
-      - name: Build package
+          set -euo pipefail
+          mkdir -p "$THEOS/sdks"
+          if [ -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+            echo "iPhoneOS16.5.sdk already present"
+            exit 0
+          fi
+          SDK_STAGE="$(mktemp -d)"
+          trap 'rm -rf "$SDK_STAGE"' EXIT
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_STAGE/sdks"
+          git -C "$SDK_STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk
+          cp -R "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
+          ls -1 "$THEOS/sdks"
+
+      - name: Install Theos dependencies
         run: |
-          cd $THEOS
-          make clean
-          make package
-      
-      - name: Upload deb package
+          brew install ldid dpkg xz
+
+      - name: Build Package
+        run: |
+          sh build.sh rootless
+          echo "=== .deb files ==="
+          find ./packages -name "*.deb" -type f
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: AxsWeChatMoments-deb
-          path: $THEOS/local/debs/*/AxsWeChatMoments_*.deb
+          path: ./packages/*.deb
+          if-no-files-found: error
+
+      - name: Create Release
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ github.token }}
+          tag_name: v${{ steps.bump.outputs.package_version }}
+          name: 微信朋友圈入口 v${{ steps.bump.outputs.package_version }}
+          files: ./packages/*.deb
