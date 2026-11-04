@@ -13,7 +13,7 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
 /* 微信 8.0.5x 的真实类名（来自 class-dump 头文件，8.0.54 / 8.0.55 一致）。 */
 static NSString * const kWQMMomentsControllerClass = @"WCTimeLineViewController";
-static NSString * const kWQMMomentsCachedIvar = "m_timelineViewController";
+static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
 
 @interface WQMMomentsRouter ()
 @property (nonatomic, readwrite, getter=isShowing) BOOL showing;
