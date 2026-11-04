@@ -108,8 +108,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     navigationController.view.frame = host.view.bounds;
     navigationController.view.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self configureNavigationBarOf:navigationController timeline:controller];
-    [self installBackSwipeOn:navigationController.view];
 
     /*
      * 状态先落定，再挂视图：viewDidAppear 是同步派发的，
@@ -120,6 +118,9 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     self.momentsController = controller;
     self.showing = YES;
     self.badgeClearedForSession = NO;
+
+    [self configureNavigationBarOf:navigationController];
+    [self installBackSwipeOn:navigationController.view];
     [bridge setTabBarHidden:YES];
 
     /*
@@ -148,8 +149,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
  * 原生朋友圈的顶栏是透明的：封面图透到状态栏下面，左上角一个白色返回箭头，
  * 右上角相机。这里只补"返回"这一半，其余交给朋友圈自己画。
  */
-- (void)configureNavigationBarOf:(UINavigationController *)navigationController
-                        timeline:(UIViewController *)timeline {
+- (void)configureNavigationBarOf:(UINavigationController *)navigationController {
     BOOL hideBar = [[WQMConfig wqm_shared] wqm_boolForKey:@"hideHostNavBar" defaultValue:NO];
     navigationController.navigationBarHidden = hideBar;
     if (hideBar) {
@@ -164,6 +164,19 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     bar.tintColor = [UIColor whiteColor];
 
     if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
+    [self ensureBackButton];
+}
+
+/*
+ * 朋友圈自己会在 viewDidLoad / viewWillAppear 里整理 navigationItem，
+ * 我们提前塞的返回箭头可能被它清掉，所以出现之后再补一次（已有就不覆盖）。
+ */
+- (void)ensureBackButton {
+    UIViewController *timeline = self.momentsController;
+    UINavigationController *navigation = self.hostNavigation;
+    if (!timeline || !navigation || navigation.navigationBarHidden) return;
+    if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
+    if (timeline.navigationItem.leftBarButtonItem) return;
 
     UIBarButtonItem *back =
         [[UIBarButtonItem alloc] initWithImage:wqm_chevron_image(24.0, 2.2)
@@ -213,6 +226,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        [weakSelf ensureBackButton];
         [weakSelf clearBadgeIfNeeded];
     });
 }
@@ -313,6 +327,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     BOOL isTimelineRoot = (viewController == self.momentsController) ||
         (self.hostNavigation && viewController == self.hostNavigation.viewControllers.firstObject);
     if (isTimelineRoot) {
+        [self ensureBackButton];
         [self clearBadgeIfNeeded];
     }
 }
