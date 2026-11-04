@@ -71,7 +71,7 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
 - (void)setTabBarBadgeString:(id)value forIndex:(unsigned long long)index {
     NSString *adjusted = [[WQMBadgeCoordinator shared] adjustedBadgeString:value
                                                                    forIndex:(NSUInteger)index];
-    %orig(adjusted);
+    %orig(adjusted, index);
 }
 
 - (void)setTabBarBadgeValue:(unsigned long long)value forIndex:(unsigned long long)index {

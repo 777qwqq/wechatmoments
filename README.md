@@ -44,6 +44,19 @@ down ──► pending ──(计时到)──► held ──(抬手)──► l
 只有触点落在「发现」槽位内识别器才参与竞争，其它槽位在 `touchesBegan` 里直接 `Failed`，
 「微信 / 通讯录 / 我」的手感不受任何影响。
 
+**还要处理微信自己的那个 tap。** 底栏点击并不是系统的 `setSelectedIndex:`，
+而是 `MMTabBarController` 自带的 `singleTapGesture` + `setTabBarItemSelectedIndex:`。
+两个手势默认互不排斥：我们识别成功的同一帧，微信也会把 tab 切到「发现」。
+结果就是"朋友圈进去了，但返回落在发现页"。
+
+所以安装识别器时会建立一条失败依赖：
+
+```objc
+[singleTapGesture requireGestureRecognizerToFail:ourRecognizer];
+```
+
+我们成功 → 微信的 tap 必然失败 → 不会切 tab；我们失败（点到别的槽位）→ 微信照常处理。
+
 ### 2. 红点：只清朋友圈，汇总点自己重算
 
 底栏那个点是**子项汇总**（朋友圈 / 视频号 / 直播 / 看一看…）。整体置 `nil` 等于把别人的未读也标记成已读，
@@ -80,19 +93,20 @@ UITabBarController
 `popViewControllerAnimated:` / `popToRootViewControllerAnimated:` / `dismissViewControllerAnimated:` 三个入口
 都做了 `viewControllers.count <= 1` 判断，二级页面的返回完全不经过这段逻辑。
 
-**底栏选中态**：进入时用 `UITabBar.selectedItem` 把高亮钉在「发现」（不动 `selectedIndex`，
-所以底下的 tab 内容不会被切换、发现页也不会被加载），退出时还原；
-`layoutSubviews` 里只做一次廉价的重钉，不改动 tab 的选中动画节奏。
+**底栏选中态**：微信的底栏是 `MMTabBar : UITabBar`，高亮由每个 `MMTabBarItemView.isSelected` 决定，
+不是 `selectedItem`。所以进入时直接改 item view 的选中态（不动 `selectedIndex`，
+底下的 tab 内容不会被切换、发现页也不会被加载），退出时按当前 `selectedIndex` 还原；
+`layoutSubviews` 之后重钉一次，避免被 `relayoutTabBarItems` 打回去。
 
 ## 目录结构
 
 ```
-Hooks/WQMMain.xm                    只 Hook 通用类（UITabBar / UITabBarController / UINavigationController / UIViewController / UITabBarItem）
+Hooks/WQMMain.xm                    通用类 + MMTabBarController / MMUINavigationController 的钩子
 Sources/WQMPressMachine.{h,c}       单击/长按 状态机（纯 C，可测）
 Sources/WQMBadgeMath.{h,c}          红点扣减与回灌窗口（纯 C，可测）
 Sources/WQMDiscoverPressRecognizer  把状态机接到 UIKit 的识别器
-Sources/WQMTabBarBridge             底栏/发现项定位、槽位计算、高亮钉选、识别器安装
-Sources/WQMMomentsRouter            朋友圈的定向进入/退出、类名解析与学习
+Sources/WQMTabBarBridge             底栏/发现槽位定位、MMTabBarItemView 高亮、识别器与 tap 依赖
+Sources/WQMMomentsRouter            朋友圈的定向进入/退出、类名解析
 Sources/WQMBadgeCoordinator         红点三级策略
 Sources/WQMTouchShield              切换动画期间的触摸兜底
 Sources/WQMConfig / WQMPreferences  配置快照与唯一写入入口
@@ -108,17 +122,15 @@ sh build.sh rootless          # 或 rootful / roothide / all
 
 产物在 `packages/`。推送到 `main` 会触发 GitHub Actions 自动编译并发布 Release。
 
-## 首次使用：类名学习
+## 类名与版本适配
 
-朋友圈控制器的类名随微信版本变化，插件不硬编码某一个（内置候选只是提示）。
-第一次单击「发现」如果还没解析到类名，会**降级为原行为**（打开发现页）并进入学习模式：
+朋友圈控制器是 **`WCTimeLineViewController`**，底栏是 **`MMTabBarController` / `MMTabBar`**，
+发现页是 **`FindFriendEntryViewController`**。前两个已在 class-dump 的微信 8.0.54 与 8.0.55
+头文件里确认一致（[Huangbai233/WeChatHeaders](https://github.com/Huangbai233/WeChatHeaders)）。
 
-1. 你从发现页点进朋友圈；
-2. 插件在 `pushViewController:` 里识别出"从发现页推上来的那个控制器"，把类名写进
-   `/var/mobile/Library/Preferences/can.qwq.wechatmoments.plist` 的 `learnedMomentsClass`；
-3. 之后单击「发现」即可直达。
-
-也可以手动指定：`momentsClass`（类名）、`extraMomentsClasses`（逗号分隔的额外候选）。
+进入时优先复用发现页自己缓存的那份朋友圈实例（`m_timelineViewController`，session / 数据源 /
+已读状态都是微信初始化好的），拿不到才 `alloc init`。升级微信后若类名变了，可用
+`momentsClass` 手动指定，不必重新编译。
 
 ## 配置项
 
@@ -133,7 +145,26 @@ sh build.sh rootless          # 或 rootful / roothide / all
 | `momentsClass` | — | 手动指定朋友圈控制器类名 |
 | `extraMomentsClasses` | — | 追加候选，逗号分隔 |
 | `sourceClearSelectors` | — | 自定义"标记朋友圈已读"的选择器，逗号分隔 |
-| `verboseLog` | `false` | 打开后 `log stream --predicate 'eventMessage CONTAINS "WeChatMoments"'` 可见 |
+| `verboseLog` | `true` | `log stream --predicate 'eventMessage CONTAINS "WeChatMoments"'` 可见 |
+
+## 排查
+
+装好后日志里应该依次出现这几行（`verboseLog` 默认开）：
+
+```
+[WeChatMoments] loaded (enabled=1), WCTimeLineViewController found
+[WeChatMoments] recognizer installed on MMTabBar (hold 400ms, discover slot 2)
+[WeChatMoments] linked MMTabBarController.singleTapGesture to our recognizer
+[WeChatMoments] using moments class WCTimeLineViewController
+[WeChatMoments] enter moments via WCTimeLineViewController (nav MMUINavigationController, ...)
+[WeChatMoments] exit moments (pop-timeline-root)
+```
+
+- 只有前两行 → 手势装了但没进路由器：检查点击是否落在「发现」槽位；
+- `WCTimeLineViewController MISSING` → 类名随版本变了，用 `momentsClass` 覆盖；
+- 有 `enter moments` 但 0.6s 后跟一条 `not in window, aborting` → 实例化方式在该版本不可用，
+  请把这两行日志发我；
+- 完全没有 `loaded` → 插件没注入，检查 `WeChatMoments.plist` 的 filter 是否为 `com.tencent.xin`。
 
 ## 验证清单
 
