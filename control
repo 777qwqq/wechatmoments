@@ -1,6 +1,6 @@
 Package: com.yourname.wechatmoments
 Name: 微信朋友圈入口
-Version: 1.0.0~beta1
+Version: 1.0.0
 Architecture: iphoneos-arm
 Description: 微信朋友圈入口
 Maintainer: YourName
