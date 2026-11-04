@@ -42,6 +42,7 @@ int main(void) {
     wqm_badge_ledger_open(&ledger, 3, 0.0, 5.0);
     check("stale 3 at t=1 dropped", wqm_badge_ledger_should_drop(&ledger, 3, 1.0), 1);
     check("bigger 4 at t=1 allowed", wqm_badge_ledger_should_drop(&ledger, 4, 1.0), 0);
+    check("smaller 2 at t=1 allowed (remaining sub-items)", wqm_badge_ledger_should_drop(&ledger, 2, 1.0), 0);
     check("zero always allowed", wqm_badge_ledger_should_drop(&ledger, 0, 1.0), 0);
     check("stale 3 at t=6.5 expired", wqm_badge_ledger_should_drop(&ledger, 3, 6.5), 0);
     check("ledger deactivated after expiry", ledger.active, 0);

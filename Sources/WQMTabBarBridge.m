@@ -442,6 +442,79 @@ static NSArray *wqm_item_views(UITabBar *bar) {
     [self applyTabBarHidden];
 }
 
+#pragma mark - 红点状态
+
+- (UIView *)discoverItemView {
+    NSArray *views = wqm_item_views(self.tabBar);
+    NSUInteger index = self.discoverIndex;
+    if (!views || index == NSUIntegerMax || index >= views.count) return nil;
+    id view = views[index];
+    return [view isKindOfClass:[UIView class]] ? view : nil;
+}
+
+- (long long)discoverUnreadCount {
+    UIView *itemView = [self discoverItemView];
+    if (itemView) {
+        long long count = 0;
+        @try {
+            count = [[itemView valueForKey:@"unreadCount"] longLongValue];
+        } @catch (NSException *exception) {
+            count = 0;
+        }
+        if (count > 0) return count;
+
+        NSString *badge = nil;
+        @try {
+            badge = [itemView valueForKey:@"badgeString"];
+        } @catch (NSException *exception) {
+            badge = nil;
+        }
+        if ([badge isKindOfClass:[NSString class]] && badge.length) {
+            return [badge longLongValue];
+        }
+    }
+    return self.discoverItem.badgeValue.integerValue;
+}
+
+- (NSString *)discoverBadgeString {
+    UIView *itemView = [self discoverItemView];
+    if (itemView) {
+        NSString *badge = nil;
+        @try {
+            badge = [itemView valueForKey:@"badgeString"];
+        } @catch (NSException *exception) {
+            badge = nil;
+        }
+        if ([badge isKindOfClass:[NSString class]] && badge.length) return badge;
+    }
+    return self.discoverItem.badgeValue;
+}
+
+- (BOOL)discoverBadgeVisible {
+    UIView *itemView = [self discoverItemView];
+    if (!itemView) return self.discoverItem.badgeValue.length > 0;
+    if ([self discoverUnreadCount] > 0) return YES;
+
+    /*
+     * 没有数字的小红点：unreadCount / badgeString 都可能是空的，
+     * 真正的可见性在 badgeView 上。
+     */
+    UIView *badgeView = nil;
+    @try {
+        badgeView = [itemView valueForKey:@"badgeView"];
+    } @catch (NSException *exception) {
+        badgeView = nil;
+    }
+    if ([badgeView isKindOfClass:[UIView class]]) {
+        /*
+         * 不能用 badgeView.window 判断：进入朋友圈时我们把整条底栏藏了，
+         * badgeView 会随之脱离 window，但"红点是否存在"这个状态没变。
+         */
+        if (badgeView.superview && !badgeView.hidden && badgeView.alpha > 0.01f) return YES;
+    }
+    return NO;
+}
+
 /*
  * 只靠 hidden 不够：微信会在自己的 layout 里把底栏复位。
  * 同时把 alpha 和交互关掉，等于给底栏加了一个"隐形"状态，

@@ -62,16 +62,25 @@ down ──► pending ──(计时到)──► held ──(抬手)──► l
 底栏那个点是**子项汇总**（朋友圈 / 视频号 / 直播 / 看一看…）。整体置 `nil` 等于把别人的未读也标记成已读，
 这是本插件明确要避免的行为。所以采用三级策略：
 
+> 先要认清一件事：微信底栏的「发现」红点绝大多数时候是**没有数字的小圆点**。
+> `badgeString` 和 `badgeValue` 都是空的，但 `MMTabBarItemView.badgeView` 显示着。
+> 只读前两个字段，会得出"本来就没红点"的结论——这正是早期版本"点了没反应"的直接原因。
+> 现在按 `unreadCount > 0 || badgeString.length || badgeView 可见` 三者取或来判断。
+
 1. **让微信自己算**（首选）：调用发现页的 `onTimeLineViewReturn`——这是微信"从朋友圈返回"的官方回调，
    它会清掉朋友圈这一项、再按剩余子项重算汇总。这样视频号、直播的未读一条都不会丢。
 2. **只关朋友圈那一个开关**（微信没走通时）：发现页把朋友圈红点记在 `isShowingMomentsRedDot`
-   和 `m_timelineRedDotView` 上，只清这两个，再请微信重算汇总，其它子项一概不碰。
-3. **保守扣减**（拿不到子项信息时）：用 `WQMBadgeMath` 只减去朋友圈那部分；
-   完全不知道数量时，**最多减 1**，绝不整体清零。
-   > 单个未读时直接归零，多个未读时只减一 —— 宁可少清一点，也不误清别的子项。
+   和 `m_timelineRedDotView` 上，只清这两个，再用 `noteTabBarBadge:andTotalCount:` / `updateTabBarBadge`
+   请微信重算汇总，其它子项一概不碰。
+3. **显示层清除**（前两级都没动静时）：
+   - 带数字的红点 → 用 `WQMBadgeMath` 保守扣减，只减朋友圈那部分，拿不到数量时**最多减 1**；
+   - 纯小圆点 → 调 `MMTabBarController.removeRedDotOnTabBarItemAtIndex:`，配合
+     `MMTabBarItemView.removeSmallRedDot` / `setBadgeViewHidden:`。没有数量可分，就没有"误减别人"的问题。
 4. **拦截回灌**（`WQMBadgeLedger`）：本地清完之后，服务端同步或本地缓存可能把同一份旧汇总刷回来。
-   清除时开一个 5s 窗口（`badgeWindow` 可调），窗口内 `incoming <= 清除前的值` 的更新被丢弃；
-   比旧值更大的更新一律放行（那是真的来了新消息）。
+   清除时开一个 5s 窗口（`badgeWindow` 可调），窗口内**只有和清除前一模一样**的汇总被丢弃；
+   更小的值（微信按剩余子项重算的结果，比如 5→3）和更大的值都放行——否则会连带把别人的未读也吃掉。
+5. **重试**：朋友圈的"已读上报"是网络请求，落库有延迟。清除失败会在 1.2s 后再来一轮，最多 3 轮，
+   一读到"没有红点"就立刻停。
 
 数值全部走纯函数，`Tests/test_badge_math.c` 覆盖了解析、扣减、窗口过期的真值表。
 
@@ -182,8 +191,9 @@ ls -t /var/mobile/Containers/Data/Application/*/tmp/WeChatMoments.log | head -1
 [22:41:03.641] linked MMTabBarController.singleTapGesture to our recognizer
 [22:41:05.882] using moments class WCTimeLineViewController
 [22:41:05.905] enter moments via WCTimeLineViewController (nav MMUINavigationController, ...)
-[22:41:06.612] badge 3 present, asked WeChat to mark moments read (1)
-[22:41:07.010] badge cleared by WeChat itself: 3 -> 0
+[22:41:06.612] discover badge visible (unread 0), attempt 1
+[22:41:06.613] asked WeChat to settle moments return (1), discover page FindFriendEntryViewController
+[22:41:06.980] badge cleared by WeChat itself
 [22:41:09.117] exit moments (back-button)
 ```
 

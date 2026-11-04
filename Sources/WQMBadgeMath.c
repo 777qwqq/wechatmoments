@@ -59,9 +59,13 @@ int wqm_badge_ledger_should_drop(WQMBadgeLedger *ledger, int incomingTotal, doub
     /* 比清除前的汇总还大，说明是新的聚合结果，必须放行。 */
     if (incomingTotal > ledger->ceiling) return 0;
 
-    /* 只有精确等于旧值时续期；否则窗口自然过期，不无限拦截。 */
-    if (incomingTotal == ledger->ceiling) {
-        ledger->clearedAt = now;
-    }
+    /*
+     * 只有"和清除前一模一样"的那份汇总才是回灌的陈旧值。
+     * 比它小的值是微信按剩余子项重算后的结果（比如 5 -> 3，视频号还有 3 条），
+     * 必须放行，否则会连带把别的子项也标成已读。
+     */
+    if (incomingTotal < ledger->ceiling) return 0;
+
+    ledger->clearedAt = now;
     return 1;
 }

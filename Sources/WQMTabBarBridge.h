@@ -48,4 +48,17 @@
 - (void)setTabBarHidden:(BOOL)hidden;
 @property (nonatomic, readonly) BOOL tabBarHidden;
 
+/*
+ * 发现 tab 的红点状态。
+ *
+ * 微信的 tab 红点平时是个没有数字的小圆点（badgeString 为空、unreadCount 保留），
+ * 所以只读 badgeValue / badgeString 会误判成"本来就没红点"——
+ * 这也是之前清红点"看起来什么都没发生"的原因。
+ */
+- (UIView *)discoverItemView;
+- (BOOL)discoverBadgeVisible;
+- (long long)discoverUnreadCount;
+/* 数字红点的文本；纯小圆点时为空。 */
+- (NSString *)discoverBadgeString;
+
 @end
