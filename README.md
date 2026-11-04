@@ -180,7 +180,8 @@ sh build.sh rootless          # 或 rootful / roothide / all
 
 ## 已知限制
 
-- 依赖微信自身的控制器，类名解析不到时会降级为原行为（不会白屏、不会崩）；
-- 若某版本把 `setBadgeValue:` 换到自己的子类实现，红点回灌拦截会失效（扣减逻辑仍生效）；
-- 若微信用 `present` 而不是 `push` 打开朋友圈，学习模式走 `viewDidAppear` 的类名匹配分支；
+- 若某版本改变朋友圈实例化方式，present 后 0.6s 的自检会发现"视图没挂到窗口"，
+  此时自动退回原生发现页并在日志里记一条 `not in window, aborting presentation`；
+- 红点回灌拦截依赖 `MMTabBarController` 的 badge 写入接口，版本改了会退化成"不拦截"，
+  但扣减逻辑本身仍然生效；
 - 本插件只处理底栏交互，不改动朋友圈内部任何逻辑。

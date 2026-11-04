@@ -143,6 +143,8 @@ static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
         if (!view.window) {
             WQMLog(@"moments view not in window, aborting presentation");
             [strongSelf exitAnimated:NO reason:@"not-visible"];
+            /* 至少让用户能按老路径进朋友圈，而不是点了没反应。 */
+            [[WQMTabBarBridge shared] openDiscoverPage];
         }
     });
 }
