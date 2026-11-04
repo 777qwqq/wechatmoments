@@ -3,7 +3,7 @@
 把底栏「发现」从一个**入口页**改造成**朋友圈的快捷入口**：单击直达时间线，长按才进原来的九宫格，
 返回时绕过发现页直接落回消息主页。
 
-- 包标识：`can.qwq.wechatmoments`
+- 包标识：`cn.qwq.wechatmoments`
 - 作用进程：`com.tencent.xin`（主 App，不含扩展）
 - 环境：iOS 15+ / 越狱（rootless、rootful、roothide 均可）
 
@@ -134,7 +134,7 @@ sh build.sh rootless          # 或 rootful / roothide / all
 
 ## 配置项
 
-写入 `/var/mobile/Library/Preferences/can.qwq.wechatmoments.plist`（改完发 Darwin 通知即生效）：
+写入 `/var/mobile/Library/Preferences/cn.qwq.wechatmoments.plist`（改完发 Darwin 通知即生效）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -149,15 +149,35 @@ sh build.sh rootless          # 或 rootful / roothide / all
 
 ## 排查
 
+### 日志在哪
+
+插件同时写两份：系统统一日志（`NSLog`）和**微信沙盒**里的文件：
+
+```
+/var/mobile/Containers/Data/Application/<UUID>/tmp/WeChatMoments.log
+```
+
+UUID 每次重装微信都会变，直接用它找：
+
+```bash
+ls -t /var/mobile/Containers/Data/Application/*/tmp/WeChatMoments.log | head -1
+```
+
+文件上限 30KB，写满后自动丢弃最旧的一半（保留最新 15KB），并留一行 `--- rotated ---` 分隔。
+`verboseLog` 关掉后不再写文件。
+
+### 正常应该看到的顺序
+
 装好后日志里应该依次出现这几行（`verboseLog` 默认开）：
 
 ```
-[WeChatMoments] loaded (enabled=1), WCTimeLineViewController found
-[WeChatMoments] recognizer installed on MMTabBar (hold 400ms, discover slot 2)
-[WeChatMoments] linked MMTabBarController.singleTapGesture to our recognizer
-[WeChatMoments] using moments class WCTimeLineViewController
-[WeChatMoments] enter moments via WCTimeLineViewController (nav MMUINavigationController, ...)
-[WeChatMoments] exit moments (pop-timeline-root)
+[22:41:03.120] loaded (enabled=1), WCTimeLineViewController found
+[22:41:03.121] log file: /var/mobile/.../tmp/WeChatMoments.log
+[22:41:03.640] recognizer installed on MMTabBar (hold 400ms, discover slot 2)
+[22:41:03.641] linked MMTabBarController.singleTapGesture to our recognizer
+[22:41:05.882] using moments class WCTimeLineViewController
+[22:41:05.905] enter moments via WCTimeLineViewController (nav MMUINavigationController, ...)
+[22:41:09.117] exit moments (pop-timeline-root)
 ```
 
 - 只有前两行 → 手势装了但没进路由器：检查点击是否落在「发现」槽位；

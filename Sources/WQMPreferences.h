@@ -4,8 +4,8 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import "WQMPaths.h"
 
-static NSString * const WQMConfigDomain = @"can.qwq.wechatmoments";
-static NSString * const WQMConfigChanged = @"can.qwq.wechatmoments.preferences-changed";
+static NSString * const WQMConfigDomain = @"cn.qwq.wechatmoments";
+static NSString * const WQMConfigChanged = @"cn.qwq.wechatmoments.preferences-changed";
 
 static inline NSDictionary *wqm_readPreferences(void) {
     NSString *path = wqm_preferencesPath();

@@ -164,5 +164,6 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
         WQMLog(@"loaded (enabled=%d), WCTimeLineViewController %@",
                [config wqm_isEnabled],
                NSClassFromString(@"WCTimeLineViewController") ? @"found" : @"MISSING");
+        WQMLog(@"log file: %@", wqm_log_file_path());
     }
 }

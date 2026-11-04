@@ -5,7 +5,7 @@
   "display_name": "微信朋友圈入口",
   "class_prefix": "WQM",
   "symbol_prefix": "wqm_",
-  "package": "can.qwq.wechatmoments",
+  "package": "cn.qwq.wechatmoments",
   "author": "777qwq",
   "bundle": "com.tencent.xin",
   "sdk_version": "16.5",

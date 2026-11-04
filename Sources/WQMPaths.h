@@ -17,7 +17,7 @@ static inline NSString *wqm_resourcePath(NSString *rootfsPath) {
 }
 
 static inline NSString *wqm_preferencesPath(void) {
-    NSString *path = @"/var/mobile/Library/Preferences/can.qwq.wechatmoments.plist";
+    NSString *path = @"/var/mobile/Library/Preferences/cn.qwq.wechatmoments.plist";
 #ifdef THEOS_PACKAGE_SCHEME_ROOTHIDE
     return jbroot(path);
 #else

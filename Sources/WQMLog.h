@@ -14,6 +14,9 @@ BOOL wqm_log_enabled(void);
 void wqm_log_set_enabled(BOOL enabled);
 void wqm_log_write(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
+/* 微信沙盒 tmp/WeChatMoments.log（上限 30KB，超出后保留最新 15KB）。 */
+NSString *wqm_log_file_path(void);
+
 #ifdef __cplusplus
 }
 #endif

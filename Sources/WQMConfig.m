@@ -28,7 +28,7 @@ static void wqm_preferencesDidChange(CFNotificationCenterRef center, void *obser
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _reloadQueue = dispatch_queue_create("can.qwq.wechatmoments.config", DISPATCH_QUEUE_SERIAL);
+        _reloadQueue = dispatch_queue_create("cn.qwq.wechatmoments.config", DISPATCH_QUEUE_SERIAL);
         [self wqm_reload];
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge const void *)self, wqm_preferencesDidChange,
