@@ -1,4 +1,5 @@
 #import <math.h>
+#import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 #import "WQMTabBarBridge.h"
 #import "WQMConfig.h"
@@ -11,6 +12,10 @@ static NSString * const kWQMDiscoverTitle = @"发现";
 static NSString * const kWQMMessageTitle = @"微信";
 static const NSUInteger kWQMDiscoverFallbackIndex = 2;
 
+/* 微信自己的类名；只在运行时按字符串取，不硬链接。 */
+static NSString * const kWQMDiscoverClassName = @"FindFriendEntryViewController";
+static NSString * const kWQMMainFrameClassName = @"NewMainFrameViewController";
+
 @interface WQMTabBarBridge ()
 @property (nonatomic, readwrite, weak) UITabBar *tabBar;
 @property (nonatomic, readwrite, weak) UITabBarController *tabBarController;
@@ -18,11 +23,8 @@ static const NSUInteger kWQMDiscoverFallbackIndex = 2;
 @property (nonatomic, readwrite) NSUInteger discoverIndex;
 @property (nonatomic, readwrite) NSUInteger messageIndex;
 @property (nonatomic, weak) WQMDiscoverPressRecognizer *recognizer;
-@property (nonatomic, strong) UITabBarItem *savedSelectedItem;
 @property (nonatomic, readwrite) BOOL forcingHighlight;
-@property (nonatomic, readwrite) BOOL allowsDiscoverSelection;
-@property (nonatomic) BOOL assertingHighlight;
-@property (nonatomic) NSTimeInterval redemptionDeadline;
+@property (nonatomic, weak) UIGestureRecognizer *observedSingleTap;
 @end
 
 static BOOL wqm_view_looks_like_tab_bar(UIView *view) {
@@ -43,9 +45,25 @@ static void wqm_collect_tab_bars(UIView *root, int depth, NSMutableArray<UIView 
 
 /*
  * 一个 App 里可能同时存在多个 tab bar（例如内嵌的业务页）。
- * 这里按"标题里有 发现/微信"给候选打分，避免把识别器装到错误的 bar 上。
+ * 主 tab bar 一定挂在 MMTabBarController 上，优先按这个判断，避免装错。
  */
 static NSInteger wqm_score_tab_bar(UIView *bar) {
+    NSInteger score = 0;
+
+    NSString *className = NSStringFromClass(bar.class);
+    if ([className isEqualToString:@"MMTabBar"]) score += 20;
+
+    UIResponder *responder = bar;
+    int guard = 0;
+    while (responder && guard++ < 24) {
+        if ([responder isKindOfClass:[UITabBarController class]]) {
+            score += 10;
+            if ([NSStringFromClass([responder class]) isEqualToString:@"MMTabBarController"]) score += 20;
+            break;
+        }
+        responder = responder.nextResponder;
+    }
+
     id items = nil;
     @try {
         items = [bar valueForKey:@"items"];
@@ -57,10 +75,10 @@ static NSInteger wqm_score_tab_bar(UIView *bar) {
     NSArray *array = (NSArray *)items;
     if (array.count == 0) return NSIntegerMin;
 
-    NSInteger score = 0;
     if (array.count >= 3) score += 1;
-    if (array.count == 4) score += 1;
+    if (array.count == 4) score += 2;
     if (CGRectGetWidth(bar.bounds) > 0) score += 1;
+    if (bar.window) score += 5;
 
     for (id item in array) {
         NSString *title = nil;
@@ -69,17 +87,22 @@ static NSInteger wqm_score_tab_bar(UIView *bar) {
         } @catch (NSException *exception) {
             continue;
         }
-        if ([title isEqualToString:@"发现"]) score += 4;
-        if ([title isEqualToString:@"微信"]) score += 2;
+        if ([title isEqualToString:kWQMDiscoverTitle]) score += 6;
+        if ([title isEqualToString:kWQMMessageTitle]) score += 3;
     }
     return score;
 }
 
-static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
-    for (UIView *subview in root.subviews) {
-        [out addObject:subview];
-        wqm_collect_subviews(subview, out);
+/* MMTabBar 的每个格子是一个 MMTabBarItemView，高亮由它的 isSelected 决定。 */
+static NSArray *wqm_item_views(UITabBar *bar) {
+    if (!bar) return nil;
+    id views = nil;
+    @try {
+        views = [bar valueForKey:@"tabBarItemViews"];
+    } @catch (NSException *exception) {
+        return nil;
     }
+    return [views isKindOfClass:[NSArray class]] ? (NSArray *)views : nil;
 }
 
 @implementation WQMTabBarBridge
@@ -141,22 +164,30 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
         return;
     }
 
-    NSUInteger discover = [self resolveIndexForTitle:kWQMDiscoverTitle
-                                             inItems:items
-                                          controller:controller
-                                        fallbackSlot:kWQMDiscoverFallbackIndex];
+    NSUInteger discover = [self indexOfDiscoverInController:controller];
+    if (discover == NSUIntegerMax) {
+        discover = [self resolveIndexForTitle:kWQMDiscoverTitle
+                                      inItems:items
+                                   controller:controller
+                                 fallbackSlot:kWQMDiscoverFallbackIndex];
+    }
     self.discoverIndex = discover;
     self.discoverItem = (discover < items.count) ? items[discover] : nil;
 
-    self.messageIndex = [self resolveIndexForTitle:kWQMMessageTitle
-                                           inItems:items
-                                        controller:controller
-                                      fallbackSlot:0];
+    NSUInteger message = [self indexOfMainFrameInController:controller];
+    if (message == NSUIntegerMax) {
+        message = [self resolveIndexForTitle:kWQMMessageTitle
+                                     inItems:items
+                                  controller:controller
+                                fallbackSlot:0];
+    }
+    self.messageIndex = message;
 }
 
 - (UITabBarController *)controllerForTabBar:(UITabBar *)bar {
     UIResponder *responder = bar;
-    while (responder) {
+    int guard = 0;
+    while (responder && guard++ < 24) {
         if ([responder isKindOfClass:[UITabBarController class]]) {
             return (UITabBarController *)responder;
         }
@@ -169,6 +200,73 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
         }
     }
     return nil;
+}
+
+- (BOOL)controllerLooksLikeDiscover:(UIViewController *)viewController {
+    if (!viewController) return NO;
+    NSString *className = NSStringFromClass(viewController.class);
+    if ([className containsString:kWQMDiscoverClassName]) return YES;
+    if ([className containsString:@"Discover"]) return YES;
+    return NO;
+}
+
+/* 逐层拆开每个 tab 的导航栈，找发现页；返回的是 tab 槽位。 */
+- (NSUInteger)indexOfClass:(NSString *)className inController:(UITabBarController *)controller {
+    if (!controller) return NSUIntegerMax;
+    NSArray<UIViewController *> *children = controller.viewControllers;
+    for (NSUInteger index = 0; index < children.count; index++) {
+        UIViewController *child = children[index];
+        if ([NSStringFromClass(child.class) containsString:className]) return index;
+        if ([child isKindOfClass:[UINavigationController class]]) {
+            for (UIViewController *inner in ((UINavigationController *)child).viewControllers) {
+                if ([NSStringFromClass(inner.class) containsString:className]) return index;
+            }
+            if ([NSStringFromClass([((UINavigationController *)child).viewControllers.firstObject class])
+                    containsString:className]) {
+                return index;
+            }
+        }
+    }
+    return NSUIntegerMax;
+}
+
+- (NSUInteger)indexOfDiscoverInController:(UITabBarController *)controller {
+    if (!controller) return NSUIntegerMax;
+    NSArray<UIViewController *> *children = controller.viewControllers;
+    for (NSUInteger index = 0; index < children.count; index++) {
+        UIViewController *child = children[index];
+        if ([self controllerLooksLikeDiscover:child]) return index;
+        if ([child isKindOfClass:[UINavigationController class]]) {
+            NSArray<UIViewController *> *stack = ((UINavigationController *)child).viewControllers;
+            for (UIViewController *inner in stack) {
+                if ([self controllerLooksLikeDiscover:inner]) return index;
+            }
+        }
+    }
+    return NSUIntegerMax;
+}
+
+- (NSUInteger)indexOfMainFrameInController:(UITabBarController *)controller {
+    return [self indexOfClass:kWQMMainFrameClassName inController:controller];
+}
+
+- (UIViewController *)discoverController {
+    UITabBarController *controller = self.tabBarController;
+    NSUInteger index = self.discoverIndex;
+    if (!controller || index == NSUIntegerMax) return nil;
+    NSArray<UIViewController *> *children = controller.viewControllers;
+    if (index >= children.count) return nil;
+
+    UIViewController *child = children[index];
+    if ([self controllerLooksLikeDiscover:child]) return child;
+    if ([child isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)child;
+        for (UIViewController *inner in nav.viewControllers) {
+            if ([self controllerLooksLikeDiscover:inner]) return inner;
+        }
+        return nav.viewControllers.firstObject;
+    }
+    return child;
 }
 
 - (NSUInteger)resolveIndexForTitle:(NSString *)title
@@ -184,33 +282,7 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
         if ([children[index].tabBarItem.title isEqualToString:title]) return index;
     }
 
-    /* 标题拿不到时，用底栏上那个文字标签的实际位置反推槽位。 */
-    NSUInteger byLabel = [self indexForLabelWithTitle:title itemCount:items.count];
-    if (byLabel != NSUIntegerMax) return byLabel;
-
     return (fallbackSlot < items.count) ? fallbackSlot : NSUIntegerMax;
-}
-
-- (NSUInteger)indexForLabelWithTitle:(NSString *)title itemCount:(NSUInteger)count {
-    UITabBar *bar = self.tabBar;
-    if (!bar || count == 0) return NSUIntegerMax;
-
-    CGFloat slotWidth = CGRectGetWidth(bar.bounds) / (CGFloat)count;
-    if (slotWidth <= 0) return NSUIntegerMax;
-
-    NSMutableArray<UIView *> *subviews = [NSMutableArray array];
-    wqm_collect_subviews(bar, subviews);
-
-    for (UIView *view in subviews) {
-        if (![view isKindOfClass:[UILabel class]]) continue;
-        UILabel *label = (UILabel *)view;
-        if (![label.text isEqualToString:title]) continue;
-
-        CGPoint center = [label.superview convertPoint:label.center toView:bar];
-        NSInteger index = (NSInteger)floor(center.x / slotWidth);
-        if (index >= 0 && index < (NSInteger)count) return (NSUInteger)index;
-    }
-    return NSUIntegerMax;
 }
 
 #pragma mark - 手势
@@ -222,7 +294,11 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
 
     UITabBar *bar = self.tabBar;
     if (!bar) return;
-    if (self.recognizer && self.recognizer.view == bar) return;
+
+    if (self.recognizer && self.recognizer.view == bar) {
+        [self attachFailureRequirement];
+        return;
+    }
 
     if (self.recognizer) {
         [self.recognizer.view removeGestureRecognizer:self.recognizer];
@@ -245,7 +321,6 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
         [generator impactOccurred];
     };
     recognizer.onTap = ^{
-        [weakSelf markTapForRedemption];
         [[WQMMomentsRouter shared] handleDiscoverTap];
     };
     recognizer.onLongPress = ^{
@@ -254,17 +329,53 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
 
     [bar addGestureRecognizer:recognizer];
     self.recognizer = recognizer;
-    WQMLog(@"recognizer installed on %@ (hold %.0fms)", NSStringFromClass(bar.class), recognizer.holdDelay * 1000.0);
+
+    [self attachFailureRequirement];
+
+    WQMLog(@"recognizer installed on %@ (hold %.0fms, discover slot %ld)",
+           NSStringFromClass(bar.class), recognizer.holdDelay * 1000.0,
+           (long)(self.discoverIndex == NSUIntegerMax ? -1 : (NSInteger)self.discoverIndex));
+}
+
+/*
+ * 关键：微信的 MMTabBarController 自带 singleTapGesture 处理底栏点击。
+ * 手势之间不会因为"我们成功了"就自动让另一个失败，必须显式建立
+ * "微信的 tap 必须等我们失败"的依赖，否则点发现会同时触发
+ * 进朋友圈 + 切发现页，返回时就落在发现页上。
+ */
+- (void)attachFailureRequirement {
+    WQMDiscoverPressRecognizer *recognizer = self.recognizer;
+    UITabBarController *controller = self.tabBarController;
+    if (!recognizer || !controller) return;
+
+    id gesture = nil;
+    @try {
+        gesture = [controller valueForKey:@"singleTapGesture"];
+    } @catch (NSException *exception) {
+        gesture = nil;
+    }
+    if (![gesture isKindOfClass:[UIGestureRecognizer class]]) return;
+    if (gesture == recognizer) return;
+
+    if (self.observedSingleTap == gesture) {
+        [gesture requireGestureRecognizerToFail:recognizer];
+        return;
+    }
+    self.observedSingleTap = gesture;
+    [gesture requireGestureRecognizerToFail:recognizer];
+    WQMLog(@"linked %@.singleTapGesture to our recognizer",
+           NSStringFromClass(controller.class));
 }
 
 - (void)layoutDidChange {
-    /* layoutSubviews 触发很频繁，这里只做最便宜的检查。 */
     if (self.forcingHighlight) {
-        [self assertDiscoverHighlight];
+        [self applyItemViewSelection];
     }
     if (!self.recognizer) {
         [self refresh];
         [self installRecognizerIfNeeded];
+    } else {
+        [self attachFailureRequirement];
     }
 }
 
@@ -284,18 +395,31 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
     return !CGRectIsEmpty(slot) && CGRectContainsPoint(slot, point);
 }
 
-#pragma mark - 长按：打开原发现页
+#pragma mark - 切换
+
+- (void)selectTabAtIndex:(NSUInteger)index {
+    UITabBarController *controller = self.tabBarController;
+    if (!controller) return;
+    if (index == NSUIntegerMax || index >= controller.viewControllers.count) return;
+
+    SEL selectByItem = NSSelectorFromString(@"setTabBarItemSelectedIndex:");
+    if ([controller respondsToSelector:selectByItem]) {
+        ((void (*)(id, SEL, unsigned long long))objc_msgSend)(controller, selectByItem,
+                                                            (unsigned long long)index);
+    }
+
+    /* 微信的实现若只更新了视图没有改 selectedIndex，这里补一次。 */
+    if (controller.selectedIndex != index) {
+        controller.selectedIndex = index;
+    }
+}
 
 - (void)openDiscoverPage {
-    UITabBarController *controller = self.tabBarController;
-    if (!controller || self.discoverIndex == NSUIntegerMax) return;
+    if (self.discoverIndex == NSUIntegerMax) return;
 
     /* 页面出现前先吞掉可能的残留触摸，避免抬手落到九宫格某一项上。 */
     [WQMTouchShield installForDuration:0.30];
-
-    self.allowsDiscoverSelection = YES;
-    controller.selectedIndex = self.discoverIndex;
-    self.allowsDiscoverSelection = NO;
+    [self selectTabAtIndex:self.discoverIndex];
 
     WQMLog(@"long press -> discover page (index %lu)", (unsigned long)self.discoverIndex);
 }
@@ -303,66 +427,44 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
 #pragma mark - 底栏选中态
 
 - (void)forceDiscoverHighlight:(BOOL)on {
-    UITabBar *bar = self.tabBar;
-    UITabBarItem *item = self.discoverItem;
-    if (!bar || !item) return;
+    self.forcingHighlight = on;
+    [self applyItemViewSelection];
+}
 
-    if (on) {
-        if (!self.forcingHighlight) {
-            self.savedSelectedItem = bar.selectedItem;
+- (void)applyItemViewSelection {
+    UITabBar *bar = self.tabBar;
+    if (!bar) return;
+
+    NSArray *views = wqm_item_views(bar);
+    NSUInteger target = NSUIntegerMax;
+    if (self.forcingHighlight) {
+        target = self.discoverIndex;
+    } else if (self.tabBarController) {
+        target = self.tabBarController.selectedIndex;
+    }
+    if (target == NSUIntegerMax) return;
+
+    if (views.count == 0) {
+        /* 不是 MMTabBar 的机型：退回系统接口，至少别让高亮丢掉。 */
+        if (target < bar.items.count) {
+            bar.selectedItem = bar.items[target];
         }
-        self.forcingHighlight = YES;
-        [self assertDiscoverHighlight];
-    } else {
-        self.forcingHighlight = NO;
-        /*
-         * 以"当前 selectedIndex"为准还原：进入朋友圈期间可能被切过 tab
-         * （例如退出时统一回消息主页），此时 savedSelectedItem 已经过时。
-         */
-        UITabBarItem *restore = nil;
-        if (self.tabBarController) {
-            NSInteger index = (NSInteger)self.tabBarController.selectedIndex;
-            if (index >= 0 && index < (NSInteger)bar.items.count) {
-                restore = bar.items[(NSUInteger)index];
+        return;
+    }
+
+    for (NSUInteger index = 0; index < views.count; index++) {
+        UIView *itemView = views[index];
+        BOOL selected = (index == target);
+        if ([itemView respondsToSelector:@selector(setSelected:)]) {
+            [(id)itemView setSelected:selected];
+        } else {
+            @try {
+                [itemView setValue:@(selected) forKey:@"isSelected"];
+            } @catch (NSException *exception) {
+                /* 什么都不做 */
             }
         }
-        if (!restore) restore = self.savedSelectedItem;
-        self.savedSelectedItem = nil;
-        if (restore && bar.selectedItem != restore) {
-            [self setSelectedItemWithoutReassert:restore];
-        }
     }
-}
-
-- (void)assertDiscoverHighlight {
-    UITabBar *bar = self.tabBar;
-    UITabBarItem *item = self.discoverItem;
-    if (!bar || !item || self.assertingHighlight) return;
-    if (bar.selectedItem == item) return;
-
-    [self setSelectedItemWithoutReassert:item];
-}
-
-- (void)setSelectedItemWithoutReassert:(UITabBarItem *)item {
-    if (self.assertingHighlight) return;
-    /* 兜底找到的"类 TabBar 视图"不一定实现了 setter，没实现就放弃钉选。 */
-    if (![self.tabBar respondsToSelector:@selector(setSelectedItem:)]) return;
-    self.assertingHighlight = YES;
-    self.tabBar.selectedItem = item;
-    self.assertingHighlight = NO;
-}
-
-#pragma mark - 误选认领
-
-- (void)markTapForRedemption {
-    self.redemptionDeadline = CACurrentMediaTime() + 1.0;
-}
-
-- (BOOL)consumeTapRedemption {
-    if (self.redemptionDeadline <= 0) return NO;
-    BOOL valid = CACurrentMediaTime() <= self.redemptionDeadline;
-    self.redemptionDeadline = 0;
-    return valid;
 }
 
 @end

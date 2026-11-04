@@ -21,4 +21,8 @@
 /* 由 UITabBarItem setBadgeValue: 的钩子调用，返回真正要写入的值。 */
 - (NSString *)adjustedBadgeValue:(NSString *)value forItem:(UITabBarItem *)item;
 
+/* 微信真实底栏走 MMTabBarController，按槽位过滤；返回 nil 表示丢弃这次写入。 */
+- (NSString *)adjustedBadgeString:(id)value forIndex:(NSUInteger)index;
+- (BOOL)shouldAcceptBadgeValue:(long long)value forIndex:(NSUInteger)index;
+
 @end

@@ -5,9 +5,16 @@
 /**
  * 底栏定位与外观代理。
  *
- * 微信的底栏可能是 UITabBar 的子类，也可能只保留 items/selectedItem 这套接口，
- * 所以这里不绑定具体类名：先按 isKindOfClass 找，再按"类名含 TabBar 且响应 items"兜底，
- * 都找不到就整个功能静默关闭，绝不影响微信本身。
+ * 微信 8.0.5x 的底栏是 MMTabBar : UITabBar，但高亮并不是由 selectedItem 驱动的，
+ * 而是每个 MMTabBarItemView 自己的 isSelected。切换 tab 也不走 setSelectedIndex:，
+ * 走 MMTabBarController 的 setTabBarItemSelectedIndex:，点击则由它自带的
+ * singleTapGesture 处理。
+ *
+ * 所以这里做三件事：
+ *   1. 定位底栏与"发现"槽位（优先按 FindFriendEntryViewController 类名，其次标题）；
+ *   2. 钉高亮时直接改 MMTabBarItemView.isSelected，不碰 selectedItem / selectedIndex；
+ *   3. 让我们自己的识别器成为微信 singleTapGesture 的前置失败条件，
+ *      避免"进朋友圈"和"切发现页"同时发生。
  */
 @interface WQMTabBarBridge : NSObject
 
@@ -19,24 +26,22 @@
 @property (nonatomic, readonly) NSUInteger discoverIndex;
 @property (nonatomic, readonly) NSUInteger messageIndex;
 @property (nonatomic, readonly) BOOL forcingHighlight;
-@property (nonatomic, readonly) BOOL allowsDiscoverSelection;
 
 - (void)refresh;
 - (void)installRecognizerIfNeeded;
 - (void)layoutDidChange;
 - (BOOL)pointIsInDiscoverSlot:(CGPoint)point;
 
+/* 发现页控制器（FindFriendEntryViewController），用于取朋友圈实例 / 判断槽位。 */
+- (UIViewController *)discoverController;
+
 /* 长按路径：走微信原本的"选中发现 tab"，行为与改动前一致。 */
 - (void)openDiscoverPage;
 
+/* 以微信自己的方式切换 tab（会同步 MMTabBarItemView）。 */
+- (void)selectTabAtIndex:(NSUInteger)index;
+
 /* 进入朋友圈期间把底栏高亮钉在"发现"上，返回时立刻还原。 */
 - (void)forceDiscoverHighlight:(BOOL)on;
-
-/*
- * 安全网：若识别器没能吞掉 UP，微信自己把"发现"选中了，
- * 用这个标记在 setSelectedIndex: 里认领这次误选，改走朋友圈。
- */
-- (void)markTapForRedemption;
-- (BOOL)consumeTapRedemption;
 
 @end

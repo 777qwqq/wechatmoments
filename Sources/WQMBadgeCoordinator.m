@@ -1,4 +1,5 @@
 #import <QuartzCore/QuartzCore.h>
+#import <objc/message.h>
 #import "WQMBadgeCoordinator.h"
 #import "WQMBadgeMath.h"
 #import "WQMConfig.h"
@@ -90,7 +91,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
         return;
     }
 
-    int before = wqm_badge_parse_text(item.badgeValue.UTF8String);
+    int before = wqm_badge_parse_text([self currentDiscoverBadgeText].UTF8String);
     if (before <= 0) {
         WQMLog(@"discover badge already empty");
         return;
@@ -131,13 +132,38 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     return value;
 }
 
+- (NSString *)adjustedBadgeString:(id)value forIndex:(NSUInteger)index {
+    if (self.writing) return value;
+
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+    if (index == NSUIntegerMax || index != bridge.discoverIndex) return value;
+    if (![value isKindOfClass:[NSString class]]) return value;
+
+    NSString *string = (NSString *)value;
+    int incoming = wqm_badge_parse_text(string.UTF8String);
+    if (wqm_badge_ledger_should_drop(&_ledger, incoming, CACurrentMediaTime())) {
+        WQMLog(@"drop stale aggregate badge string %d (ceiling %d)", incoming, _ledger.ceiling);
+        return nil;
+    }
+    return string;
+}
+
+- (BOOL)shouldAcceptBadgeValue:(long long)value forIndex:(NSUInteger)index {
+    if (self.writing) return YES;
+
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+    if (index == NSUIntegerMax || index != bridge.discoverIndex) return YES;
+
+    return !wqm_badge_ledger_should_drop(&_ledger, (int)value, CACurrentMediaTime());
+}
+
 #pragma mark - 写入
 
 - (void)applyTotal:(int)after toItem:(UITabBarItem *)item previous:(int)before moments:(NSInteger)moments {
     NSString *newValue = (after > 0) ? [NSString stringWithFormat:@"%d", after] : nil;
 
     self.writing = YES;
-    item.badgeValue = newValue;
+    [self writeDiscoverBadgeString:newValue fallbackItem:item];
     self.writing = NO;
 
     double window = [[WQMConfig wqm_shared] wqm_doubleForKey:@"badgeWindow" defaultValue:5.0];
@@ -145,6 +171,57 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 
     WQMLog(@"badge %d -> %@ (moments unread %ld, window %.1fs)",
            before, newValue ?: @"nil", (long)moments, window);
+}
+
+/* 微信真实底栏只认 MMTabBarItemView，优先走它自己的写入接口。 */
+- (void)writeDiscoverBadgeString:(NSString *)value fallbackItem:(UITabBarItem *)item {
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+    UITabBarController *controller = bridge.tabBarController;
+    NSUInteger index = bridge.discoverIndex;
+
+    SEL stringSelector = NSSelectorFromString(@"setTabBarBadgeString:forIndex:");
+    if (controller && index != NSUIntegerMax && [controller respondsToSelector:stringSelector]) {
+        ((void (*)(id, SEL, id, unsigned long long))objc_msgSend)(
+            controller, stringSelector, value, (unsigned long long)index);
+        return;
+    }
+
+    SEL valueSelector = NSSelectorFromString(@"setTabBarBadgeValue:forIndex:");
+    if (controller && index != NSUIntegerMax && [controller respondsToSelector:valueSelector]) {
+        ((void (*)(id, SEL, unsigned long long, unsigned long long))objc_msgSend)(
+            controller, valueSelector, (unsigned long long)MAX(0, value.integerValue),
+            (unsigned long long)index);
+        return;
+    }
+
+    item.badgeValue = value;
+}
+
+- (NSString *)currentDiscoverBadgeText {
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+    UITabBarItem *item = bridge.discoverItem;
+    if (item.badgeValue.length) return item.badgeValue;
+
+    UITabBar *bar = bridge.tabBar;
+    NSArray *views = nil;
+    @try {
+        views = [bar valueForKey:@"tabBarItemViews"];
+    } @catch (NSException *exception) {
+        views = nil;
+    }
+    if (![views isKindOfClass:[NSArray class]]) return nil;
+
+    NSUInteger index = bridge.discoverIndex;
+    if (index == NSUIntegerMax || index >= views.count) return nil;
+
+    id itemView = views[index];
+    NSString *badge = nil;
+    @try {
+        badge = [itemView valueForKey:@"badgeString"];
+    } @catch (NSException *exception) {
+        badge = nil;
+    }
+    return [badge isKindOfClass:[NSString class]] ? badge : nil;
 }
 
 #pragma mark - 数据源
@@ -193,6 +270,8 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     for (NSString *selector in selectors) {
         if (wqm_invoke_noarg(bridge.tabBarController, selector)) done = YES;
         if (wqm_invoke_noarg(bridge.tabBar, selector)) done = YES;
+        /* 发现页才是汇总红点的真正持有者（badgeAtMomentCell / updateTabBarBadge）。 */
+        if (wqm_invoke_noarg([bridge discoverController], selector)) done = YES;
     }
     return done;
 }

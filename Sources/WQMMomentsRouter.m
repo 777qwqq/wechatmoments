@@ -1,8 +1,9 @@
+#import <objc/runtime.h>
+
 #import "WQMMomentsRouter.h"
 #import "WQMBadgeCoordinator.h"
 #import "WQMConfig.h"
 #import "WQMLog.h"
-#import "WQMPreferences.h"
 #import "WQMTabBarBridge.h"
 #import "WQMTouchShield.h"
 
@@ -10,11 +11,14 @@ static NSString * const kKeyLearnedMomentsClass = @"learnedMomentsClass";
 static NSString * const kKeyMomentsClass = @"momentsClass";
 static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
+/* 微信 8.0.5x 的真实类名（来自 class-dump 头文件，8.0.54 / 8.0.55 一致）。 */
+static NSString * const kWQMMomentsControllerClass = @"WCTimeLineViewController";
+static NSString * const kWQMMomentsCachedIvar = "m_timelineViewController";
+
 @interface WQMMomentsRouter ()
 @property (nonatomic, readwrite, getter=isShowing) BOOL showing;
 @property (nonatomic) BOOL exiting;
 @property (nonatomic) BOOL badgeClearedForSession;
-@property (nonatomic) BOOL learningArmed;
 @property (nonatomic, strong) UINavigationController *hostNavigation;
 @property (nonatomic, weak) UITabBarController *hostParent;
 @property (nonatomic, strong) UIViewController *momentsController;
@@ -48,12 +52,8 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
     UIViewController *controller = [self instantiateMomentsController];
     if (!controller) {
-        /*
-         * 还没有可用的类名：这次退回微信原本的行为，同时进入"学习"状态。
-         * 用户从发现页点进朋友圈时，把那个控制器类名记下来，下次就能直达。
-         */
-        [self armLearning];
-        WQMLog(@"moments class unresolved, falling back to Discover page");
+        WQMLog(@"moments class unresolved (%@ missing), fallback to discover page",
+               kWQMMomentsControllerClass);
         [bridge openDiscoverPage];
         return;
     }
@@ -64,21 +64,31 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 - (void)presentMomentsController:(UIViewController *)controller {
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     UITabBarController *host = bridge.tabBarController;
-    if (!host || !host.view) return;
-
-    UINavigationController *navigationController =
-        [[UINavigationController alloc] initWithRootViewController:controller];
+    if (!host || !host.view) {
+        WQMLog(@"no tab controller to host moments");
+        return;
+    }
 
     /*
-     * 内容区高度截到底栏上沿：朋友圈的表格不会藏到底栏后面，
-     * 底栏本身仍然完整可见、可点。
+     * 用微信自己的导航控制器类型：朋友圈内部会按 MMUINavigationController
+     * 判断一些返回/转场行为，普通 UINavigationController 可能走到异常分支。
      */
+    Class navClass = NSClassFromString(@"MMUINavigationController");
+    if (!navClass || ![navClass isSubclassOfClass:[UINavigationController class]]) {
+        navClass = [UINavigationController class];
+    }
+    UINavigationController *navigationController =
+        [[navClass alloc] initWithRootViewController:controller];
+
+    /* 内容区高度截到底栏上沿：朋友圈的列表不会藏到底栏后面。 */
     CGRect contentFrame = host.view.bounds;
     UITabBar *tabBar = bridge.tabBar;
-    if (tabBar && tabBar.superview == host.view) {
-        CGFloat barTop = CGRectGetMinY(tabBar.frame);
-        if (barTop > 0 && barTop < CGRectGetHeight(contentFrame)) {
-            contentFrame.size.height = barTop;
+    if (tabBar && tabBar.window == host.view.window) {
+        CGRect barRect = [tabBar convertRect:tabBar.bounds toView:host.view];
+        if (barRect.size.height > 0 &&
+            barRect.origin.y > 0 &&
+            CGRectGetMinY(barRect) < CGRectGetMaxY(contentFrame)) {
+            contentFrame.size.height = CGRectGetMinY(barRect);
         }
     }
     navigationController.view.frame = contentFrame;
@@ -89,9 +99,18 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
     [host addChildViewController:navigationController];
 
-    if (tabBar && tabBar.superview == host.view) {
-        /* 盖住内容区但留在底栏下面，底栏保持可见、可点。 */
-        [host.view insertSubview:navigationController.view belowSubview:tabBar];
+    /* 底栏可能被套在一层容器里，往上找到 tab 容器的直接子视图再插到它下面。 */
+    UIView *anchor = nil;
+    if (tabBar) {
+        UIView *walker = tabBar;
+        while (walker.superview && walker.superview != host.view) {
+            walker = walker.superview;
+        }
+        if (walker.superview == host.view) anchor = walker;
+    }
+
+    if (anchor) {
+        [host.view insertSubview:navigationController.view belowSubview:anchor];
     } else {
         [host.view addSubview:navigationController.view];
     }
@@ -106,7 +125,26 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
     [bridge forceDiscoverHighlight:YES];
     [WQMTouchShield installForDuration:0.25];
 
-    WQMLog(@"enter moments via %@", NSStringFromClass(controller.class));
+    WQMLog(@"enter moments via %@ (nav %@, frame %@)",
+           NSStringFromClass(controller.class), NSStringFromClass(navClass),
+           NSStringFromCGRect(contentFrame));
+
+    [self verifyPresentation];
+}
+
+/* 自检：VC 起来了却没挂到窗口上，说明这类实例化方式在真机上不可用，及时退出。 */
+- (void)verifyPresentation {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf.showing || !strongSelf.momentsController) return;
+        UIView *view = strongSelf.momentsController.view;
+        if (!view.window) {
+            WQMLog(@"moments view not in window, aborting presentation");
+            [strongSelf exitAnimated:NO reason:@"not-visible"];
+        }
+    });
 }
 
 #pragma mark - 退出
@@ -168,80 +206,32 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 #pragma mark - 生命周期回调
 
 - (void)noteViewControllerAppeared:(UIViewController *)viewController {
-    if (!viewController) return;
+    if (!viewController || !self.showing) return;
 
-    if (self.showing) {
-        BOOL isTimelineRoot = (viewController == self.momentsController) ||
-            (self.hostNavigation && viewController == self.hostNavigation.viewControllers.firstObject);
-        if (isTimelineRoot && !self.badgeClearedForSession) {
-            self.badgeClearedForSession = YES;
-            [[WQMBadgeCoordinator shared] momentsTimelineDidAppear:self.momentsController];
-        }
-        return;
-    }
-
-    /* 学习模式的第二条通路：有些版本用 present 而不是 push。 */
-    if (self.learningArmed) {
-        NSString *className = NSStringFromClass(viewController.class);
-        if ([className containsString:@"Moment"] || [className containsString:@"Sns"]) {
-            [self learnClassNamed:className source:@"appear"];
-        }
+    BOOL isTimelineRoot = (viewController == self.momentsController) ||
+        (self.hostNavigation && viewController == self.hostNavigation.viewControllers.firstObject);
+    if (isTimelineRoot && !self.badgeClearedForSession) {
+        self.badgeClearedForSession = YES;
+        [[WQMBadgeCoordinator shared] momentsTimelineDidAppear:self.momentsController];
     }
 }
 
 - (void)notePushedController:(UIViewController *)viewController
       navigationController:(UINavigationController *)navigationController {
-    if (!self.learningArmed || !viewController || !navigationController) return;
-    if (navigationController == self.hostNavigation) return;
-
-    UIViewController *currentTop = navigationController.topViewController;
-    if (![self looksLikeDiscoverPage:currentTop]) return;
-
-    [self learnClassNamed:NSStringFromClass(viewController.class) source:@"push"];
-}
-
-- (BOOL)looksLikeDiscoverPage:(UIViewController *)viewController {
-    if (!viewController) return NO;
-    if ([viewController.title containsString:@"发现"]) return YES;
-    NSString *className = NSStringFromClass(viewController.class);
-    return [className containsString:@"Find"] || [className containsString:@"Discover"];
+    /* 保留接口：真机诊断时可以用来观察朋友圈内部的导航行为。 */
+    if (!self.showing || navigationController != self.hostNavigation) return;
+    if (!viewController) return;
+    WQMLog(@"moments push -> %@ (stack %lu)",
+           NSStringFromClass(viewController.class),
+           (unsigned long)navigationController.viewControllers.count);
 }
 
 #pragma mark - 类名解析
-
-- (void)armLearning {
-    self.learningArmed = YES;
-    WQMLog(@"learning armed: open 朋友圈 once from 发现页, class name will be cached");
-}
-
-- (void)learnClassNamed:(NSString *)className source:(NSString *)source {
-    if (className.length == 0) return;
-    self.learningArmed = NO;
-
-    NSError *error = nil;
-    if (wqm_writePreference(kKeyLearnedMomentsClass, className, &error)) {
-        WQMLog(@"learned moments class %@ (via %@)", className, source);
-    } else {
-        WQMLog(@"failed to cache moments class: %@", error.localizedDescription);
-    }
-}
 
 - (Class)resolvedMomentsClass {
     if (self.resolvedClass) return self.resolvedClass;
 
     WQMConfig *config = [WQMConfig wqm_shared];
-
-    NSArray<NSString *> *configured = @[
-        [config wqm_stringForKey:kKeyMomentsClass defaultValue:@""],
-        [config wqm_stringForKey:kKeyLearnedMomentsClass defaultValue:@""]
-    ];
-    for (NSString *name in configured) {
-        Class candidate = [self validClassNamed:name];
-        if (candidate) {
-            self.resolvedClass = candidate;
-            return candidate;
-        }
-    }
 
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     NSString *extra = [config wqm_stringForKey:kKeyExtraClasses defaultValue:@""];
@@ -252,28 +242,27 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
             if (trimmed.length) [names addObject:trimmed];
         }
     }
-    /*
-     * 内置候选只是提示，不同微信版本差异很大；
-     * 真正可靠的是 learnedMomentsClass（运行时学到的那一个）。
-     */
+    [names addObject:[config wqm_stringForKey:kKeyMomentsClass defaultValue:@""]];
+    [names addObject:[config wqm_stringForKey:kKeyLearnedMomentsClass defaultValue:@""]];
+
+    [names addObject:kWQMMomentsControllerClass];
+    /* 旧版本 / 改版后的兜底名，命中即用。 */
     [names addObjectsFromArray:@[
+        @"WCTimeLineViewController",
         @"WCMomentsTimelineViewController",
-        @"MomentsTimelineViewController",
-        @"WCMomentsViewController",
-        @"WCNewMomentsViewController",
-        @"MMMomentsViewController",
-        @"SnsTimeLineViewController",
-        @"MomentsViewController"
+        @"MMMomentsViewController"
     ]];
 
     for (NSString *name in names) {
         Class candidate = [self validClassNamed:name];
         if (candidate) {
-            WQMLog(@"using built-in candidate %@", name);
+            WQMLog(@"using moments class %@", name);
             self.resolvedClass = candidate;
             return candidate;
         }
     }
+
+    WQMLog(@"no moments class found in runtime");
     return Nil;
 }
 
@@ -285,23 +274,53 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
     return candidate;
 }
 
+/*
+ * 发现页自己缓存了一份朋友圈实例（m_timelineViewController）。
+ * 复用它是成功率最高的做法：session、数据源、已读状态都是微信自己初始化好的。
+ * 只接受"当前没有父控制器"的实例，避免把一个正在别的导航栈里的页面抢过来。
+ */
+- (UIViewController *)cachedTimelineFromDiscoverPage {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+    if (!discover) return nil;
+
+    Ivar ivar = class_getInstanceVariable(object_getClass(discover), kWQMMomentsCachedIvar);
+    if (!ivar) return nil;
+
+    id value = nil;
+    @try {
+        value = object_getIvar(discover, ivar);
+    } @catch (NSException *exception) {
+        return nil;
+    }
+    if (![value isKindOfClass:[UIViewController class]]) return nil;
+
+    UIViewController *candidate = (UIViewController *)value;
+    if (candidate.parentViewController != nil) return nil;
+    if (candidate.isViewLoaded && candidate.view.window) return nil;
+
+    WQMLog(@"reusing cached timeline from discover page");
+    return candidate;
+}
+
 - (UIViewController *)instantiateMomentsController {
     Class controllerClass = [self resolvedMomentsClass];
     if (!controllerClass) return nil;
 
+    UIViewController *cached = [self cachedTimelineFromDiscoverPage];
+    if (cached) return cached;
+
     UIViewController *controller = nil;
     @try {
-        controller = [[controllerClass alloc] initWithNibName:nil bundle:nil];
+        controller = [[controllerClass alloc] init];
     } @catch (NSException *exception) {
-        WQMLog(@"initWithNibName failed: %@", exception.reason);
+        WQMLog(@"init failed: %@", exception.reason);
     }
 
     if (![controller isKindOfClass:[UIViewController class]]) {
-        controller = nil;
         @try {
-            controller = [[controllerClass alloc] init];
+            controller = [[controllerClass alloc] initWithNibName:nil bundle:nil];
         } @catch (NSException *exception) {
-            WQMLog(@"init failed: %@", exception.reason);
+            WQMLog(@"initWithNibName failed: %@", exception.reason);
         }
     }
 
