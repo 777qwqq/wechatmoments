@@ -25,21 +25,54 @@ static const NSUInteger kWQMDiscoverFallbackIndex = 2;
 @property (nonatomic) NSTimeInterval redemptionDeadline;
 @end
 
-static UIView *wqm_find_tab_bar_view(UIView *root, int depth) {
-    if (!root || depth > 12) return nil;
-    if ([root isKindOfClass:[UITabBar class]]) return root;
+static BOOL wqm_view_looks_like_tab_bar(UIView *view) {
+    if ([view isKindOfClass:[UITabBar class]]) return YES;
+    NSString *className = NSStringFromClass(view.class);
+    return [className containsString:@"TabBar"] &&
+           [view respondsToSelector:NSSelectorFromString(@"items")] &&
+           [view respondsToSelector:NSSelectorFromString(@"selectedItem")];
+}
 
-    NSString *className = NSStringFromClass(root.class);
-    if ([className containsString:@"TabBar"] &&
-        [root respondsToSelector:NSSelectorFromString(@"items")] &&
-        [root respondsToSelector:NSSelectorFromString(@"selectedItem")]) {
-        return root;
-    }
+static void wqm_collect_tab_bars(UIView *root, int depth, NSMutableArray<UIView *> *out) {
+    if (!root || depth > 12) return;
+    if (wqm_view_looks_like_tab_bar(root)) [out addObject:root];
     for (UIView *subview in root.subviews) {
-        UIView *found = wqm_find_tab_bar_view(subview, depth + 1);
-        if (found) return found;
+        wqm_collect_tab_bars(subview, depth + 1, out);
     }
-    return nil;
+}
+
+/*
+ * 一个 App 里可能同时存在多个 tab bar（例如内嵌的业务页）。
+ * 这里按"标题里有 发现/微信"给候选打分，避免把识别器装到错误的 bar 上。
+ */
+static NSInteger wqm_score_tab_bar(UIView *bar) {
+    id items = nil;
+    @try {
+        items = [bar valueForKey:@"items"];
+    } @catch (NSException *exception) {
+        return NSIntegerMin;
+    }
+    if (![items isKindOfClass:[NSArray class]]) return NSIntegerMin;
+
+    NSArray *array = (NSArray *)items;
+    if (array.count == 0) return NSIntegerMin;
+
+    NSInteger score = 0;
+    if (array.count >= 3) score += 1;
+    if (array.count == 4) score += 1;
+    if (CGRectGetWidth(bar.bounds) > 0) score += 1;
+
+    for (id item in array) {
+        NSString *title = nil;
+        @try {
+            title = [item valueForKey:@"title"];
+        } @catch (NSException *exception) {
+            continue;
+        }
+        if ([title isEqualToString:@"发现"]) score += 4;
+        if ([title isEqualToString:@"微信"]) score += 2;
+    }
+    return score;
 }
 
 static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
@@ -74,14 +107,20 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
 - (void)refresh {
     UITabBar *bar = self.tabBar;
     if (!bar || !bar.window) {
-        bar = nil;
+        NSMutableArray<UIView *> *candidates = [NSMutableArray array];
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
-            UIView *found = wqm_find_tab_bar_view(window, 0);
-            if (found) {
-                bar = (UITabBar *)found;
-                break;
+            wqm_collect_tab_bars(window, 0, candidates);
+        }
+        UIView *best = nil;
+        NSInteger bestScore = NSIntegerMin;
+        for (UIView *candidate in candidates) {
+            NSInteger score = wqm_score_tab_bar(candidate);
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
             }
         }
+        bar = (UITabBar *)best;
         self.tabBar = bar;
     }
 
@@ -276,13 +315,18 @@ static void wqm_collect_subviews(UIView *root, NSMutableArray<UIView *> *out) {
         [self assertDiscoverHighlight];
     } else {
         self.forcingHighlight = NO;
-        UITabBarItem *restore = self.savedSelectedItem;
-        if (!restore && self.tabBarController) {
+        /*
+         * 以"当前 selectedIndex"为准还原：进入朋友圈期间可能被切过 tab
+         * （例如退出时统一回消息主页），此时 savedSelectedItem 已经过时。
+         */
+        UITabBarItem *restore = nil;
+        if (self.tabBarController) {
             NSInteger index = (NSInteger)self.tabBarController.selectedIndex;
             if (index >= 0 && index < (NSInteger)bar.items.count) {
                 restore = bar.items[(NSUInteger)index];
             }
         }
+        if (!restore) restore = self.savedSelectedItem;
         self.savedSelectedItem = nil;
         if (restore && bar.selectedItem != restore) {
             [self setSelectedItemWithoutReassert:restore];
