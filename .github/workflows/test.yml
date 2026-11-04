@@ -46,5 +46,5 @@ jobs:
       - name: Upload deb package
         uses: actions/upload-artifact@v4
         with:
-          name: AxsWeChatMoments-deb
-          path: $THEOS/local/debs/*/AxsWeChatMoments_*.deb
+          name: WeChatMoments-deb
+          path: $THEOS/local/debs/*/WeChatMoments_*.deb

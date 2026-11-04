@@ -3,13 +3,14 @@
   "name": "WeChatMoments",
   "id": "wechatmoments",
   "display_name": "微信朋友圈入口",
-  "class_prefix": "AxsWeChatMoments",
-  "symbol_prefix": "axs_wechatmoments",
-  "package": "com.yourname.wechatmoments",
-  "bundle": "com.apple.springboard",
+  "class_prefix": "WQM",
+  "symbol_prefix": "wqm_",
+  "package": "can.qwq.wechatmoments",
+  "author": "777qwq",
+  "bundle": "com.tencent.xin",
   "sdk_version": "16.5",
-  "minimum_ios": "14.0",
+  "minimum_ios": "15.0",
   "preferences": false,
   "slider": false,
-  "github_actions": false
+  "github_actions": true
 }

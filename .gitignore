@@ -1,0 +1,6 @@
+.theos/
+packages/
+Tests/test_press_machine
+Tests/test_badge_math
+*.o
+.DS_Store

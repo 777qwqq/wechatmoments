@@ -1,11 +1,9 @@
-Package: com.yourname.wechatmoments
+Package: can.qwq.wechatmoments
 Name: 微信朋友圈入口
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm
-Description: 微信朋友圈入口
-Maintainer: YourName
-Author: YourName
-Section: tweak
+Description: 底栏"发现"单击直达朋友圈，长按打开原发现页；返回落回消息主页；红点只清朋友圈子项。
+Maintainer: 777qwq
+Author: 777qwq
+Section: Tweaks
 Depends: mobilesubstrate
-Icon: https://github.com/yourname/wechatmoments/icon/wechatmoments.png
-Sileodepiction: https://github.com/yourname/wechatmoments/sileodepiction/wechatmoments/js.json

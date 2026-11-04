@@ -8,7 +8,7 @@
 #import <rootless.h>
 #endif
 
-static inline NSString *axs_wechatmoments_resourcePath(NSString *rootfsPath) {
+static inline NSString *wqm_resourcePath(NSString *rootfsPath) {
 #ifdef THEOS_PACKAGE_SCHEME_ROOTHIDE
     return jbroot(rootfsPath);
 #else
@@ -16,12 +16,12 @@ static inline NSString *axs_wechatmoments_resourcePath(NSString *rootfsPath) {
 #endif
 }
 
-static inline NSString *axs_wechatmoments_preferencesPath(void) {
-    NSString *path = @"/var/mobile/Library/Preferences/com.yourname.wechatmoments.plist";
+static inline NSString *wqm_preferencesPath(void) {
+    NSString *path = @"/var/mobile/Library/Preferences/can.qwq.wechatmoments.plist";
 #ifdef THEOS_PACKAGE_SCHEME_ROOTHIDE
     return jbroot(path);
 #else
-    // Mobile user preferences do not use the rootless installation prefix.
+    /* 用户偏好不跟随 rootless 安装前缀。 */
     return path;
 #endif
 }
