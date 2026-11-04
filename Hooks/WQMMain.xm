@@ -132,6 +132,29 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
 
 %end
 
+/*
+ * 朋友圈顶栏那颗返回按钮，点下去走的是它自己的 onTimeLineViewReturn：
+ * 原生场景下它靠"发现页那条导航栈"来 pop，我们挂在独立导航栈上就 pop 不到东西。
+ * 这里补一条通道，让它的返回信号直接落到我们的退出逻辑。
+ */
+@interface WCTimeLineViewController : UIViewController
+- (void)onTimeLineViewReturn;
+@end
+
+%hook WCTimeLineViewController
+
+- (void)onTimeLineViewReturn {
+    WQMMomentsRouter *router = [WQMMomentsRouter shared];
+    WQMLog(@"timeline -onTimeLineViewReturn (showing=%d atRoot=%d)",
+           router.isShowing, router.isAtTimelineRoot);
+    %orig;
+    if ([router ownsViewController:self]) {
+        [router handleNativeReturnSignal];
+    }
+}
+
+%end
+
 %hook UITabBarItem
 
 - (void)setBadgeValue:(NSString *)badgeValue {

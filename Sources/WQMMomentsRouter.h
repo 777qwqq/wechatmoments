@@ -36,4 +36,7 @@
 /* 微信改动了导航栏可见性之后重新确认一次返回项。 */
 - (void)refreshChrome;
 
+/* 朋友圈自己发出的"要返回了"信号（它顶栏按钮会先走这里）。 */
+- (void)handleNativeReturnSignal;
+
 @end

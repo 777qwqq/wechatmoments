@@ -1,5 +1,6 @@
 #import <objc/runtime.h>
 #import <math.h>
+#import <QuartzCore/QuartzCore.h>
 
 #import "WQMMomentsRouter.h"
 #import "WQMBadgeCoordinator.h"
@@ -38,6 +39,8 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 
 @interface WQMMomentsRouter () <UIGestureRecognizerDelegate>
 @property (nonatomic, readwrite, getter=isShowing) BOOL showing;
+/* 进入时刻，用来给"朋友圈返回信号"加一个短暂的防误触窗口。 */
+@property (nonatomic) NSTimeInterval presentedAt;
 @property (nonatomic) BOOL exiting;
 @property (nonatomic) BOOL badgeClearedForSession;
 @property (nonatomic) BOOL edgeSwipeTriggered;
@@ -50,6 +53,8 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 @property (nonatomic) BOOL discoverInTimelineBefore;
 @property (nonatomic) BOOL hasDiscoverInTimelineSnapshot;
 @property (nonatomic, weak) id previousMomentsDelegate;
+/* 已经被我们挂过手势的原生返回视图，避免重复添加。 */
+@property (nonatomic, weak) UIView *hijackedBackView;
 @end
 
 @implementation WQMMomentsRouter
@@ -124,6 +129,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     self.momentsController = controller;
     self.showing = YES;
     self.badgeClearedForSession = NO;
+    self.presentedAt = CACurrentMediaTime();
 
     /*
      * 关键：先把朋友圈接回发现页。
@@ -190,6 +196,42 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
  * 导航栏被朋友圈藏掉时不补任何东西：原生朋友圈没有可见返回键，
  * 返回交给左缘侧滑，多一个悬浮箭头反而和原生不一致。
  */
+/*
+ * 朋友圈自己是全屏沉浸式的，左上角那颗返回是它设在 navigationItem 上的。
+ * 那颗按钮的 action 是朋友圈内部逻辑：它会去 pop "发现页那条导航栈"，
+ * 而我们是把朋友圈挂在独立的 hostNavigation 上，它 pop 不到任何东西 ——
+ * 表现就是点了完全没反应（连我们的 pop hook 都进不去）。
+ *
+ * 所以这里把它接到我们自己的退出逻辑上：不改外观、不加新控件。
+ */
+- (void)hijackBackItem:(UIBarButtonItem *)item {
+    if (!item) return;
+
+    UIView *custom = item.customView;
+    if (custom) {
+        if (self.hijackedBackView == custom) return;
+        custom.userInteractionEnabled = YES;
+        /*
+         * cancelsTouchesInView = NO：朋友圈原来的点击逻辑照常走，
+         * 我们只是"顺便"接管一次退出，避免破坏它的埋点。
+         */
+        UITapGestureRecognizer *tap =
+            [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                    action:@selector(handleBackButton)];
+        tap.cancelsTouchesInView = NO;
+        [custom addGestureRecognizer:tap];
+        self.hijackedBackView = custom;
+        WQMLog(@"hijacked native back view %@", NSStringFromClass(custom.class));
+        return;
+    }
+
+    if (item.target != self || item.action != @selector(handleBackButton)) {
+        item.target = self;
+        item.action = @selector(handleBackButton);
+        WQMLog(@"hijacked native back item -> router");
+    }
+}
+
 - (void)ensureBackButton {
     UIViewController *timeline = self.momentsController;
     UINavigationController *navigation = self.hostNavigation;
@@ -197,7 +239,21 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
 
     if (navigation.navigationBarHidden) return;
-    if (timeline.navigationItem.leftBarButtonItem) return;
+
+    /*
+     * 朋友圈已经放了自己的返回按钮：接管它的点击，而不是再叠一个。
+     * 这是之前的坑 —— 看到一个 leftBarButtonItem 就 return，
+     * 结果那颗按钮的 action 在独立导航栈里是空操作。
+     */
+    UIBarButtonItem *existing = timeline.navigationItem.leftBarButtonItem;
+    if (!existing && timeline.navigationItem.leftBarButtonItems.count > 0) {
+        /* 有些版本把返回塞在数组里。 */
+        existing = timeline.navigationItem.leftBarButtonItems.firstObject;
+    }
+    if (existing) {
+        [self hijackBackItem:existing];
+        return;
+    }
 
     UIBarButtonItem *back =
         [[UIBarButtonItem alloc] initWithImage:wqm_chevron_image(24.0, 2.2)
@@ -349,6 +405,23 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     [self exitAnimated:YES reason:@"back-button"];
 }
 
+/*
+ * 朋友圈顶栏按钮的兜底通道。
+ * 刚进来的半秒内忽略：有些版本会在 viewDidAppear 里也走一遍这个方法。
+ */
+- (void)handleNativeReturnSignal {
+    if (!self.showing) return;
+    if (CACurrentMediaTime() - self.presentedAt < 0.5) {
+        WQMLog(@"ignored return signal during entry window");
+        return;
+    }
+    if (!self.isAtTimelineRoot) {
+        [self.hostNavigation popViewControllerAnimated:YES];
+        return;
+    }
+    [self exitAnimated:YES reason:@"timeline-return"];
+}
+
 #pragma mark - 红点
 
 - (void)scheduleBadgeClear {
@@ -487,6 +560,21 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     if (isTimelineRoot) {
         [self ensureBackButton];
         [self clearBadgeIfNeeded];
+
+        /*
+         * 朋友圈的 navigationItem 是它自己在 viewDidLoad / viewWillAppear 里拼的，
+         * 有时我们第一次看的时候还没挂上去。晚一点再接管一次。
+         */
+        __weak typeof(self) weakSelf = self;
+        for (NSNumber *delay in @[@0.3, @1.0]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self.showing) return;
+                [self ensureBackButton];
+            });
+        }
     }
 }
 
