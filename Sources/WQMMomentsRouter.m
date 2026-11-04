@@ -68,7 +68,20 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
     UINavigationController *navigationController =
         [[UINavigationController alloc] initWithRootViewController:controller];
-    navigationController.view.frame = host.view.bounds;
+
+    /*
+     * 内容区高度截到底栏上沿：朋友圈的表格不会藏到底栏后面，
+     * 底栏本身仍然完整可见、可点。
+     */
+    CGRect contentFrame = host.view.bounds;
+    UITabBar *tabBar = bridge.tabBar;
+    if (tabBar && tabBar.superview == host.view) {
+        CGFloat barTop = CGRectGetMinY(tabBar.frame);
+        if (barTop > 0 && barTop < CGRectGetHeight(contentFrame)) {
+            contentFrame.size.height = barTop;
+        }
+    }
+    navigationController.view.frame = contentFrame;
     navigationController.view.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     navigationController.navigationBarHidden =
@@ -76,7 +89,6 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
     [host addChildViewController:navigationController];
 
-    UITabBar *tabBar = bridge.tabBar;
     if (tabBar && tabBar.superview == host.view) {
         /* 盖住内容区但留在底栏下面，底栏保持可见、可点。 */
         [host.view insertSubview:navigationController.view belowSubview:tabBar];
