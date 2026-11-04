@@ -17,16 +17,7 @@ jobs:
       
       - name: Install Theos
         run: |
-          mkdir -p /opt/theos
-          cd /opt/theos
-          git clone --depth 1 https://github.com/theos/theos.git .
-      
-      - name: Download iOS Toolchain
-        run: |
-          cd /opt/theos
-          curl -L -o toolchain.tar.xz \
-            "https://github.com/theos/toolchain/releases/download/master-146e41f/toolchain.tar.xz"
-          tar -xf toolchain.tar.xz
+          brew install theos || (cd /opt/theos && git clone --depth 1 https://github.com/theos/theos.git .)
       
       - name: Download iOS SDKs
         run: |
@@ -39,41 +30,15 @@ jobs:
         run: |
           cd /opt/theos
           git submodule update --init vendor
-      
-      - name: Set up environment variables
-        run: |
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
-          echo "THEOS_TARGET=arm64:13.0:16.5" >> $GITHUB_ENV
-          echo "THEOS_PACKAGE_DEVICE_ROOT=" >> $GITHUB_ENV
-      
-      - name: Download iOS SDKs
-        run: |
-          cd /opt/theos/sdks
-          curl -L -o iPhoneOS16.5.sdk.tar.xz \
-            "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
-          tar -xf iPhoneOS16.5.sdk.tar.xz
-      
-      - name: Update Theos submodules
-        run: |
-          cd /opt/theos
-          git submodule update --init vendor
-      
-      - name: Set up environment variables
-        run: |
-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
-          echo "TARGET=arm64:13.0:16.5" >> $GITHUB_ENV
-          echo "THEOS_PACKAGE_DEVICE_ROOT=" >> $GITHUB_ENV
       
       - name: Build package
         run: |
           cd $THEOS
-          make -C . clean
+          make clean
           make package
       
       - name: Upload deb package
         uses: actions/upload-artifact@v4
         with:
           name: AxsWeChatMoments-deb
-          path: |
-            $THEOS/local/debs/*/AxsWeChatMoments_*.deb
-            $THEOS/local/debs/*/AxsWeChatMoments_*.deb.dSYM/
+          path: $THEOS/local/debs/*/AxsWeChatMoments_*.deb
