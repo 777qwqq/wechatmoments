@@ -24,6 +24,7 @@ static NSString * const kWQMMainFrameClassName = @"NewMainFrameViewController";
 @property (nonatomic, readwrite) NSUInteger messageIndex;
 @property (nonatomic, weak) WQMDiscoverPressRecognizer *recognizer;
 @property (nonatomic, readwrite) BOOL forcingHighlight;
+@property (nonatomic, readwrite) BOOL tabBarHidden;
 @property (nonatomic, weak) UIGestureRecognizer *observedSingleTap;
 @end
 
@@ -368,6 +369,9 @@ static NSArray *wqm_item_views(UITabBar *bar) {
 }
 
 - (void)layoutDidChange {
+    if (self.tabBarHidden) {
+        [self applyTabBarHidden];
+    }
     if (self.forcingHighlight) {
         [self applyItemViewSelection];
     }
@@ -429,6 +433,33 @@ static NSArray *wqm_item_views(UITabBar *bar) {
 - (void)forceDiscoverHighlight:(BOOL)on {
     self.forcingHighlight = on;
     [self applyItemViewSelection];
+}
+
+#pragma mark - 底栏显隐
+
+- (void)setTabBarHidden:(BOOL)hidden {
+    _tabBarHidden = hidden;
+    [self applyTabBarHidden];
+}
+
+/*
+ * 只靠 hidden 不够：微信会在自己的 layout 里把底栏复位。
+ * 同时把 alpha 和交互关掉，等于给底栏加了一个"隐形"状态，
+ * 这样即使它中途 layout 一次也不会闪出来、更不会接走那次触摸。
+ */
+- (void)applyTabBarHidden {
+    UITabBar *bar = self.tabBar;
+    if (!bar) return;
+
+    if (self.tabBarHidden) {
+        bar.hidden = YES;
+        bar.alpha = 0.0;
+        bar.userInteractionEnabled = NO;
+    } else {
+        bar.hidden = NO;
+        bar.alpha = 1.0;
+        bar.userInteractionEnabled = YES;
+    }
 }
 
 - (void)applyItemViewSelection {

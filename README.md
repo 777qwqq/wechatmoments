@@ -62,13 +62,14 @@ down ──► pending ──(计时到)──► held ──(抬手)──► l
 底栏那个点是**子项汇总**（朋友圈 / 视频号 / 直播 / 看一看…）。整体置 `nil` 等于把别人的未读也标记成已读，
 这是本插件明确要避免的行为。所以采用三级策略：
 
-1. **让微信自己算**（首选）：调用时间线的"标记已读"入口（`markAllAsRead` / `clearUnread` 等，
-   可用 `sourceClearSelectors` 配置），再触发它自己的汇总重算（`updateBadge` / `refreshRedDot` 等）。
-   这样汇总点会按"是否还有其他未读"自然收敛，视频号、直播的未读一条都不会丢。
-2. **保守扣减**（拿不到子项信息时）：用 `WQMBadgeMath` 只减去朋友圈那部分；
+1. **让微信自己算**（首选）：调用发现页的 `onTimeLineViewReturn`——这是微信"从朋友圈返回"的官方回调，
+   它会清掉朋友圈这一项、再按剩余子项重算汇总。这样视频号、直播的未读一条都不会丢。
+2. **只关朋友圈那一个开关**（微信没走通时）：发现页把朋友圈红点记在 `isShowingMomentsRedDot`
+   和 `m_timelineRedDotView` 上，只清这两个，再请微信重算汇总，其它子项一概不碰。
+3. **保守扣减**（拿不到子项信息时）：用 `WQMBadgeMath` 只减去朋友圈那部分；
    完全不知道数量时，**最多减 1**，绝不整体清零。
    > 单个未读时直接归零，多个未读时只减一 —— 宁可少清一点，也不误清别的子项。
-3. **拦截回灌**（`WQMBadgeLedger`）：本地清完之后，服务端同步或本地缓存可能把同一份旧汇总刷回来。
+4. **拦截回灌**（`WQMBadgeLedger`）：本地清完之后，服务端同步或本地缓存可能把同一份旧汇总刷回来。
    清除时开一个 5s 窗口（`badgeWindow` 可调），窗口内 `incoming <= 清除前的值` 的更新被丢弃；
    比旧值更大的更新一律放行（那是真的来了新消息）。
 
@@ -83,8 +84,9 @@ UITabBarController
         └─ 时间线 → 详情 / 图片 / 评论 …
 ```
 
-朋友圈没有进任何一个 tab 的导航栈，而是作为 tab 容器的 child 插在**内容区之上、底栏之下**：
+朋友圈没有进任何一个 tab 的导航栈，而是作为 tab 容器的 child **铺满整个容器**（原生朋友圈没有底栏）：
 
+- 进页面时把底栏整条收起（`hidden + alpha 0 + 关掉交互`），退出时还原，中间不会露出 tab 内容；
 - 出去时不存在"发现页"这个东西，所以返回天然落在用户原来的 tab 上，再统一切回消息主页；
 - 不需要 hook 返回键，也不会和微信自己的返回逻辑打架；
 - 时间线内部仍然是一个正常的 `UINavigationController`，二级页面照常 `push/pop`。
@@ -93,10 +95,12 @@ UITabBarController
 `popViewControllerAnimated:` / `popToRootViewControllerAnimated:` / `dismissViewControllerAnimated:` 三个入口
 都做了 `viewControllers.count <= 1` 判断，二级页面的返回完全不经过这段逻辑。
 
-**底栏选中态**：微信的底栏是 `MMTabBar : UITabBar`，高亮由每个 `MMTabBarItemView.isSelected` 决定，
-不是 `selectedItem`。所以进入时直接改 item view 的选中态（不动 `selectedIndex`，
-底下的 tab 内容不会被切换、发现页也不会被加载），退出时按当前 `selectedIndex` 还原；
-`layoutSubviews` 之后重钉一次，避免被 `relayoutTabBarItems` 打回去。
+**返回入口**：原生朋友圈靠导航栏左上角的返回箭头。宿主导航栏默认为**透明**（封面图透到状态栏下面），
+我们在时间线的 `navigationItem` 上补一个白色返回箭头；栈里只有一层时系统侧滑是禁用的，
+所以另外挂了一条左缘 `UIScreenEdgePanGestureRecognizer` 兜底。二级页面走系统自己的返回，不吃这条逻辑。
+
+**底栏选中态**：因为整条底栏在朋友圈期间是隐藏的，不再需要"钉高亮"。
+退出时只做一件事——把 `selectedIndex` 归到「微信」，底栏重新出现时就是消息主页。
 
 ## 目录结构
 
@@ -141,7 +145,8 @@ sh build.sh rootless          # 或 rootful / roothide / all
 | `enabled` | `true` | 总开关，关闭后所有 Hook 直通 |
 | `holdDelayMs` | `400` | 长按阈值，200–800ms 之间 |
 | `badgeWindow` | `5.0` | 拦截陈旧回灌的窗口（秒） |
-| `hideHostNavBar` | `true` | 朋友圈宿主导航栏是否隐藏（交给微信用自己的导航栏） |
+| `hideHostNavBar` | `false` | 隐藏宿主导航栏（隐藏后只剩左缘侧滑可以返回） |
+| `showBackButton` | `true` | 在朋友圈顶栏补一个白色返回箭头 |
 | `momentsClass` | — | 手动指定朋友圈控制器类名 |
 | `extraMomentsClasses` | — | 追加候选，逗号分隔 |
 | `sourceClearSelectors` | — | 自定义"标记朋友圈已读"的选择器，逗号分隔 |
@@ -177,7 +182,9 @@ ls -t /var/mobile/Containers/Data/Application/*/tmp/WeChatMoments.log | head -1
 [22:41:03.641] linked MMTabBarController.singleTapGesture to our recognizer
 [22:41:05.882] using moments class WCTimeLineViewController
 [22:41:05.905] enter moments via WCTimeLineViewController (nav MMUINavigationController, ...)
-[22:41:09.117] exit moments (pop-timeline-root)
+[22:41:06.612] badge 3 present, asked WeChat to mark moments read (1)
+[22:41:07.010] badge cleared by WeChat itself: 3 -> 0
+[22:41:09.117] exit moments (back-button)
 ```
 
 - 只有前两行 → 手势装了但没进路由器：检查点击是否落在「发现」槽位；
@@ -190,7 +197,7 @@ ls -t /var/mobile/Containers/Data/Application/*/tmp/WeChatMoments.log | head -1
 
 装好后按顺序过一遍：
 
-1. 单击「发现」→ 直接进时间线，底栏「发现」高亮，**没有**出现九宫格；
+1. 单击「发现」→ 直接进时间线，**整条底栏收起**（原生朋友圈就没有底栏），左上角有返回箭头，九宫格不出现；
 2. 时间线里点开一条动态 → 返回，回到时间线（不是消息主页）；
 3. 再返回 → 落到消息主页，底栏高亮「微信」；
 4. 长按「发现」约 0.4s（有触感）→ 抬手后进入九宫格，随手点一项不会误开；

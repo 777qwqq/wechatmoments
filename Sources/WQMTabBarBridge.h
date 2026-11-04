@@ -44,4 +44,8 @@
 /* 进入朋友圈期间把底栏高亮钉在"发现"上，返回时立刻还原。 */
 - (void)forceDiscoverHighlight:(BOOL)on;
 
+/* 原生朋友圈是整屏的：进页面把底栏整条收起来，退出再放回来。 */
+- (void)setTabBarHidden:(BOOL)hidden;
+@property (nonatomic, readonly) BOOL tabBarHidden;
+
 @end

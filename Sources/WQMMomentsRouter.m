@@ -15,6 +15,26 @@ static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 static NSString * const kWQMMomentsControllerClass = @"WCTimeLineViewController";
 static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
 
+/* 手绘一个返回箭头，避免依赖 SF Symbols（theos 的 SDK 版本不一定有）。 */
+static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
+    if (size <= 0) return nil;
+
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    CGContextSetLineWidth(context, lineWidth);
+    CGContextSetLineCap(context, kCGLineCapRound);
+    CGContextSetLineJoin(context, kCGLineJoinRound);
+    CGContextSetStrokeColorWithColor(context, [UIColor whiteColor].CGColor);
+    CGContextMoveToPoint(context, size * 0.62, size * 0.20);
+    CGContextAddLineToPoint(context, size * 0.36, size * 0.50);
+    CGContextAddLineToPoint(context, size * 0.62, size * 0.80);
+    CGContextStrokePath(context);
+
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+}
+
 @interface WQMMomentsRouter ()
 @property (nonatomic, readwrite, getter=isShowing) BOOL showing;
 @property (nonatomic) BOOL exiting;
@@ -23,6 +43,7 @@ static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
 @property (nonatomic, weak) UITabBarController *hostParent;
 @property (nonatomic, strong) UIViewController *momentsController;
 @property (nonatomic, strong) Class resolvedClass;
+@property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *edgePan;
 @end
 
 @implementation WQMMomentsRouter
@@ -80,56 +101,127 @@ static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
     UINavigationController *navigationController =
         [[navClass alloc] initWithRootViewController:controller];
 
-    /* 内容区高度截到底栏上沿：朋友圈的列表不会藏到底栏后面。 */
-    CGRect contentFrame = host.view.bounds;
-    UITabBar *tabBar = bridge.tabBar;
-    if (tabBar && tabBar.window == host.view.window) {
-        CGRect barRect = [tabBar convertRect:tabBar.bounds toView:host.view];
-        if (barRect.size.height > 0 &&
-            barRect.origin.y > 0 &&
-            CGRectGetMinY(barRect) < CGRectGetMaxY(contentFrame)) {
-            contentFrame.size.height = CGRectGetMinY(barRect);
-        }
-    }
-    navigationController.view.frame = contentFrame;
+    /*
+     * 原生朋友圈是整屏的：占满 tab 容器，底栏稍后整条收起。
+     * 不再按底栏上沿截断内容区。
+     */
+    navigationController.view.frame = host.view.bounds;
     navigationController.view.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    navigationController.navigationBarHidden =
-        [[WQMConfig wqm_shared] wqm_boolForKey:@"hideHostNavBar" defaultValue:YES];
+    [self configureNavigationBarOf:navigationController timeline:controller];
+    [self installBackSwipeOn:navigationController.view];
 
-    [host addChildViewController:navigationController];
-
-    /* 底栏可能被套在一层容器里，往上找到 tab 容器的直接子视图再插到它下面。 */
-    UIView *anchor = nil;
-    if (tabBar) {
-        UIView *walker = tabBar;
-        while (walker.superview && walker.superview != host.view) {
-            walker = walker.superview;
-        }
-        if (walker.superview == host.view) anchor = walker;
-    }
-
-    if (anchor) {
-        [host.view insertSubview:navigationController.view belowSubview:anchor];
-    } else {
-        [host.view addSubview:navigationController.view];
-    }
-    [navigationController didMoveToParentViewController:host];
-
+    /*
+     * 状态先落定，再挂视图：viewDidAppear 是同步派发的，
+     * 如果那时 showing 还是 NO，微信自己的"已读上报 + 红点重算"会被我们挡掉。
+     */
     self.hostNavigation = navigationController;
     self.hostParent = host;
     self.momentsController = controller;
     self.showing = YES;
     self.badgeClearedForSession = NO;
+    [bridge setTabBarHidden:YES];
 
-    [bridge forceDiscoverHighlight:YES];
+    /*
+     * 手动 addChild 不会自动走 appearance 生命周期，
+     * 必须显式 begin/end 一次，viewWillAppear / viewDidAppear 才会真的派发到朋友圈。
+     */
+    [host addChildViewController:navigationController];
+    [navigationController beginAppearanceTransition:YES animated:NO];
+    [host.view addSubview:navigationController.view];
+    [navigationController endAppearanceTransition];
+    [navigationController didMoveToParentViewController:host];
+
     [WQMTouchShield installForDuration:0.25];
 
     WQMLog(@"enter moments via %@ (nav %@, frame %@)",
            NSStringFromClass(controller.class), NSStringFromClass(navClass),
-           NSStringFromCGRect(contentFrame));
+           NSStringFromCGRect(navigationController.view.frame));
 
+    [self scheduleBadgeClear];
     [self verifyPresentation];
+}
+
+#pragma mark - 顶栏与返回
+
+/*
+ * 原生朋友圈的顶栏是透明的：封面图透到状态栏下面，左上角一个白色返回箭头，
+ * 右上角相机。这里只补"返回"这一半，其余交给朋友圈自己画。
+ */
+- (void)configureNavigationBarOf:(UINavigationController *)navigationController
+                        timeline:(UIViewController *)timeline {
+    BOOL hideBar = [[WQMConfig wqm_shared] wqm_boolForKey:@"hideHostNavBar" defaultValue:NO];
+    navigationController.navigationBarHidden = hideBar;
+    if (hideBar) {
+        WQMLog(@"host nav bar hidden by config; back is edge-swipe only");
+        return;
+    }
+
+    UINavigationBar *bar = navigationController.navigationBar;
+    [bar setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
+    [bar setShadowImage:[UIImage new]];
+    bar.translucent = YES;
+    bar.tintColor = [UIColor whiteColor];
+
+    if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
+
+    UIBarButtonItem *back =
+        [[UIBarButtonItem alloc] initWithImage:wqm_chevron_image(24.0, 2.2)
+                                         style:UIBarButtonItemStylePlain
+                                        target:self
+                                        action:@selector(handleBackButton)];
+    back.accessibilityLabel = @"返回";
+    timeline.navigationItem.leftBarButtonItem = back;
+}
+
+- (void)installBackSwipeOn:(UIView *)view {
+    if (!view) return;
+    UIScreenEdgePanGestureRecognizer *pan =
+        [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self
+                                                          action:@selector(handleEdgePan:)];
+    pan.edges = UIRectEdgeLeft;
+    pan.maximumNumberOfTouches = 1;
+    [view addGestureRecognizer:pan];
+    self.edgePan = pan;
+}
+
+/* 栈里只有时间线首屏时，系统侧滑是禁用的，这里补一条左缘手势。 */
+- (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)pan {
+    if (pan.state != UIGestureRecognizerStateEnded) return;
+    if (!self.showing || !self.isAtTimelineRoot) return;
+
+    CGPoint translation = [pan translationInView:pan.view];
+    CGPoint velocity = [pan velocityInView:pan.view];
+    if (translation.x > 50.0 || velocity.x > 400.0) {
+        [self exitAnimated:YES reason:@"edge-swipe"];
+    }
+}
+
+- (void)handleBackButton {
+    if (!self.showing) return;
+    /* 二级页面（详情 / 图片 / 评论）逐级返回，只有首屏才跳出朋友圈。 */
+    if (!self.isAtTimelineRoot) {
+        [self.hostNavigation popViewControllerAnimated:YES];
+        return;
+    }
+    [self exitAnimated:YES reason:@"back-button"];
+}
+
+#pragma mark - 红点
+
+- (void)scheduleBadgeClear {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [weakSelf clearBadgeIfNeeded];
+    });
+}
+
+- (void)clearBadgeIfNeeded {
+    if (!self.showing || !self.momentsController) return;
+    if (self.badgeClearedForSession) return;
+    self.badgeClearedForSession = YES;
+    [[WQMBadgeCoordinator shared] momentsTimelineDidAppear:self.momentsController];
 }
 
 /* 自检：VC 起来了却没挂到窗口上，说明这类实例化方式在真机上不可用，及时退出。 */
@@ -160,19 +252,27 @@ static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
     UITabBarController *host = self.hostParent;
     UINavigationController *navigation = self.hostNavigation;
 
+    if (self.edgePan) {
+        [self.edgePan.view removeGestureRecognizer:self.edgePan];
+        self.edgePan = nil;
+    }
+
     /*
-     * 顺序很重要：先把底栏切回"微信"，此时朋友圈的视图还盖在上面，
-     * 用户看不到底下的内容跳变；再撤视图；最后还原选中态。
+     * 顺序：先撤整屏视图（它盖着底栏），再把底栏放回来、把选中态切到"微信"。
+     * 用户看到的是朋友圈直接消失、回到消息主页，中间不会闪一下发现页。
      */
+    [navigation willMoveToParentViewController:nil];
+    [navigation beginAppearanceTransition:NO animated:animated];
+    [navigation.view removeFromSuperview];
+    [navigation endAppearanceTransition];
+    [navigation removeFromParentViewController];
+
+    [bridge setTabBarHidden:NO];
+    [bridge forceDiscoverHighlight:NO];
+
     if (host && host.selectedIndex != bridge.messageIndex) {
         host.selectedIndex = bridge.messageIndex;
     }
-
-    [navigation willMoveToParentViewController:nil];
-    [navigation.view removeFromSuperview];
-    [navigation removeFromParentViewController];
-
-    [bridge forceDiscoverHighlight:NO];
 
     self.hostNavigation = nil;
     self.hostParent = nil;
@@ -212,9 +312,8 @@ static const char kWQMMomentsCachedIvar[] = "m_timelineViewController";
 
     BOOL isTimelineRoot = (viewController == self.momentsController) ||
         (self.hostNavigation && viewController == self.hostNavigation.viewControllers.firstObject);
-    if (isTimelineRoot && !self.badgeClearedForSession) {
-        self.badgeClearedForSession = YES;
-        [[WQMBadgeCoordinator shared] momentsTimelineDidAppear:self.momentsController];
+    if (isTimelineRoot) {
+        [self clearBadgeIfNeeded];
     }
 }
 

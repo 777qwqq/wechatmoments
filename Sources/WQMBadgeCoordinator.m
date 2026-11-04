@@ -79,17 +79,11 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 
 - (void)momentsTimelineDidAppear:(UIViewController *)timelineController {
     NSTimeInterval now = CACurrentMediaTime();
-    if (now - self.lastClearTime < 1.5) return;
+    if (now - self.lastClearTime < 1.0) return;
     self.lastClearTime = now;
 
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     [bridge refresh];
-
-    UITabBarItem *item = bridge.discoverItem;
-    if (!item) {
-        WQMLog(@"no discover item, skip badge work");
-        return;
-    }
 
     int before = wqm_badge_parse_text([self currentDiscoverBadgeText].UTF8String);
     if (before <= 0) {
@@ -98,24 +92,89 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     }
 
     /*
-     * 首选路径：让微信自己把朋友圈记为已读，再让它自己重算汇总。
-     * 这样视频号/直播等子项的未读会被保留，而不是被我们顺手抹掉。
+     * 一级：走微信自己的"从朋友圈返回"。
+     * 发现页的 onTimeLineViewReturn 就是这条链路的官方回调：清掉朋友圈这一项，
+     * 再按剩下的子项重算汇总，所以视频号 / 直播的未读会被原样保留。
      */
-    BOOL clearedAtSource = [self clearMomentsUnreadAtSource:timelineController];
-    BOOL recomputed = [self requestAggregateRecompute];
-    if (clearedAtSource && recomputed) {
-        WQMLog(@"badge handled by WeChat itself (before=%d)", before);
-        return;
-    }
+    UIViewController *discover = [bridge discoverController];
+    BOOL asked = wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
+    WQMLog(@"badge %d present, asked WeChat to mark moments read (%d)", before, asked);
 
-    NSInteger momentsUnread = -1;
-    if (![self readMomentsUnreadFrom:timelineController outValue:&momentsUnread]) {
-        momentsUnread = -1;
-    }
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewController *weakTimeline = timelineController;
 
-    WQMBadgeInput input = { before, (int)momentsUnread };
-    int after = wqm_badge_total_after_moments_read(input);
-    [self applyTotal:after toItem:item previous:before moments:momentsUnread];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+
+        int after = wqm_badge_parse_text([self currentDiscoverBadgeText].UTF8String);
+        if (after < before) {
+            [self openLedgerFrom:before];
+            WQMLog(@"badge cleared by WeChat itself: %d -> %d", before, after);
+            return;
+        }
+
+        /*
+         * 二级：只关掉发现页上"朋友圈红点"这一个开关，其它子项一概不碰，
+         * 然后请微信重算汇总。
+         */
+        BOOL flagged = [self clearMomentsDotOnDiscoverPage];
+        [self requestAggregateRecompute];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            int after2 = wqm_badge_parse_text([self currentDiscoverBadgeText].UTF8String);
+            if (after2 < before) {
+                [self openLedgerFrom:before];
+                WQMLog(@"badge cleared via discover flag (%d): %d -> %d",
+                       flagged, before, after2);
+                return;
+            }
+
+            /* 三级：拿不到子项计数就保守扣减，最多只扣朋友圈那一份。 */
+            NSInteger momentsUnread = -1;
+            if (![self readMomentsUnreadFrom:weakTimeline outValue:&momentsUnread]) {
+                momentsUnread = -1;
+            }
+            WQMBadgeInput input = { before, (int)momentsUnread };
+            int target = wqm_badge_total_after_moments_read(input);
+            WQMLog(@"badge fallback path (flag=%d, moments unread %ld)",
+                   flagged, (long)momentsUnread);
+            [self applyTotal:target
+                      toItem:[[WQMTabBarBridge shared] discoverItem]
+                    previous:before
+                     moments:momentsUnread];
+        });
+    });
+}
+
+/* 发现页把"朋友圈有没有红点"记在 isShowingMomentsRedDot + m_timelineRedDotView 上。 */
+- (BOOL)clearMomentsDotOnDiscoverPage {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+    if (!discover) return NO;
+
+    BOOL ok = NO;
+    @try {
+        [discover setValue:@NO forKey:@"isShowingMomentsRedDot"];
+        ok = YES;
+    } @catch (NSException *exception) {
+        ok = NO;
+    }
+    @try {
+        id dot = [discover valueForKey:@"m_timelineRedDotView"];
+        if ([dot isKindOfClass:[UIView class]]) {
+            ((UIView *)dot).hidden = YES;
+        }
+    } @catch (NSException *exception) {
+        /* 没有这个视图就算了 */
+    }
+    return ok;
+}
+
+- (void)openLedgerFrom:(int)before {
+    double window = [[WQMConfig wqm_shared] wqm_doubleForKey:@"badgeWindow" defaultValue:5.0];
+    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), window);
 }
 
 - (NSString *)adjustedBadgeValue:(NSString *)value forItem:(UITabBarItem *)item {
