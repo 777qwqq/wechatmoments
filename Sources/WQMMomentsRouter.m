@@ -55,6 +55,18 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 @property (nonatomic, weak) id previousMomentsDelegate;
 /* 已经被我们挂过手势的原生返回视图，避免重复添加。 */
 @property (nonatomic, weak) UIView *hijackedBackView;
+/*
+ * 我们自己攥住的时间线实例。
+ * 微信原生从发现页进朋友圈时，用的是发现页缓存槽里的同一个 VC，
+ * 退出只 pop 不销毁，所以再进来还停在原来那一屏。
+ * 这里照做：退出后不释放，下次直接复用。
+ */
+@property (nonatomic, strong) UIViewController *retainedTimeline;
+/* 与上面配套的那条导航栈，退出后一起留着。 */
+@property (nonatomic, strong) UINavigationController *retainedNavigation;
+
+- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage;
+- (UINavigationController *)reusableNavigationFor:(UIViewController *)controller;
 @end
 
 @implementation WQMMomentsRouter
@@ -93,6 +105,20 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     [self presentMomentsController:controller];
 }
 
+/*
+ * 上一轮那条导航栈还能不能接着用。
+ * 条件：栈里只有时间线首屏、已经离开宿主、不在 window 上。
+ */
+- (UINavigationController *)reusableNavigationFor:(UIViewController *)controller {
+    UINavigationController *nav = self.retainedNavigation;
+    if (!nav) return nil;
+    if (nav.viewControllers.count != 1) return nil;
+    if (nav.viewControllers.firstObject != controller) return nil;
+    if (nav.parentViewController != nil) return nil;
+    if (nav.isViewLoaded && nav.view.window) return nil;
+    return nav;
+}
+
 - (void)presentMomentsController:(UIViewController *)controller {
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     UITabBarController *host = bridge.tabBarController;
@@ -104,13 +130,34 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     /*
      * 用微信自己的导航控制器类型：朋友圈内部会按 MMUINavigationController
      * 判断一些返回/转场行为，普通 UINavigationController 可能走到异常分支。
+     *
+     * 优先复用上一轮那条 nav —— 朋友圈实例、导航栏、滚动位置全在里面，
+     * 这正是原生"退出再进来还停在原来那屏"的关键。
      */
-    Class navClass = NSClassFromString(@"MMUINavigationController");
-    if (!navClass || ![navClass isSubclassOfClass:[UINavigationController class]]) {
-        navClass = [UINavigationController class];
+    UINavigationController *navigationController = [self reusableNavigationFor:controller];
+
+    if (!navigationController) {
+        /*
+         * 复用的实例仍挂在上一轮那条 nav 上（它是 root，不会自己走掉）。
+         * 新 nav 要接管它，必须先摘掉旧关系，否则 UIKit 会因为
+         * "already has a parent" 直接拒绝。
+         */
+        if (controller.parentViewController) {
+            [controller willMoveToParentViewController:nil];
+            [controller removeFromParentViewController];
+            WQMLog(@"detached reused timeline from old nav");
+        }
+
+        Class navClass = NSClassFromString(@"MMUINavigationController");
+        if (!navClass || ![navClass isSubclassOfClass:[UINavigationController class]]) {
+            navClass = [UINavigationController class];
+        }
+        navigationController = [[navClass alloc] initWithRootViewController:controller];
+        self.retainedNavigation = navigationController;
+        WQMLog(@"created fresh navigation for moments");
+    } else {
+        WQMLog(@"reusing retained navigation");
     }
-    UINavigationController *navigationController =
-        [[navClass alloc] initWithRootViewController:controller];
 
     /*
      * 原生朋友圈是整屏的：占满 tab 容器，底栏稍后整条收起。
@@ -313,11 +360,11 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 - (void)detachMomentsFromDiscoverPage {
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
 
-    @try {
-        [self.momentsController setValue:self.previousMomentsDelegate forKey:@"delegate"];
-    } @catch (NSException *exception) {
-        /* 已经销毁就算了 */
-    }
+    /*
+     * delegate 故意不还原。
+     * 原生朋友圈的 delegate 一直指着发现页，退出后也保持连接（数据变更、红点都靠它）。
+     * 实例会被复用，断开反而会出现"第二次进入已读不结算"的问题。
+     */
     self.previousMomentsDelegate = nil;
 
     if (discover && self.hasDiscoverInTimelineSnapshot) {
@@ -638,9 +685,32 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 }
 
 /*
+ * 判断一个时间线实例能不能拿来复用。
+ *
+ * 注意：退出后它并没有"无父无母"——它是 root，仍挂在我们那条 nav 上，
+ * 只是整条 nav 已经被摘下、不在 window 里。所以 parent 非空是正常状态，
+ * 真正要排除的是"它正在屏幕上"或"栈里还压着二级页"。
+ */
+static BOOL wqm_timeline_reusable(UIViewController *controller) {
+    if (![controller isKindOfClass:[UIViewController class]]) return NO;
+    if (controller.isViewLoaded && controller.view.window) return NO;
+
+    UIViewController *parent = controller.parentViewController;
+    if (!parent) return YES;
+
+    if ([parent isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)parent;
+        if (nav.viewControllers.count != 1) return NO;
+        if (nav.isViewLoaded && nav.view.window) return NO;
+        if (nav.parentViewController != nil) return NO;
+        return YES;
+    }
+    return NO;
+}
+
+/*
  * 发现页自己缓存了一份朋友圈实例（m_timelineViewController）。
  * 复用它是成功率最高的做法：session、数据源、已读状态都是微信自己初始化好的。
- * 只接受"当前没有父控制器"的实例，避免把一个正在别的导航栈里的页面抢过来。
  */
 - (UIViewController *)cachedTimelineFromDiscoverPage {
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
@@ -658,8 +728,7 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     if (![value isKindOfClass:[UIViewController class]]) return nil;
 
     UIViewController *candidate = (UIViewController *)value;
-    if (candidate.parentViewController != nil) return nil;
-    if (candidate.isViewLoaded && candidate.view.window) return nil;
+    if (!wqm_timeline_reusable(candidate)) return nil;
 
     WQMLog(@"reusing cached timeline from discover page");
     return candidate;
@@ -669,8 +738,20 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     Class controllerClass = [self resolvedMomentsClass];
     if (!controllerClass) return nil;
 
+    /* 一、微信自己的缓存槽。 */
     UIViewController *cached = [self cachedTimelineFromDiscoverPage];
-    if (cached) return cached;
+    if (cached) {
+        self.retainedTimeline = cached;
+        return cached;
+    }
+
+    /* 二、我们上一轮退出时保留下来的实例。 */
+    UIViewController *kept = self.retainedTimeline;
+    if (wqm_timeline_reusable(kept)) {
+        WQMLog(@"reusing retained timeline %@ (loaded=%d)",
+               NSStringFromClass(kept.class), kept.isViewLoaded);
+        return kept;
+    }
 
     UIViewController *controller = nil;
     @try {
@@ -691,7 +772,47 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 
     /* 触发一次 view 加载，避免首帧尺寸为 0 时布局错乱。 */
     (void)controller.view;
+
+    /*
+     * 新建之后养起来：自己持有一份，同时塞回发现页的缓存槽，
+     * 让微信后续的"从朋友圈返回 / 更新红点"也能找到这个实例。
+     */
+    self.retainedTimeline = controller;
+    [self storeTimeline:controller onDiscoverPage];
     return controller;
+}
+
+/*
+ * 把实例写回发现页的 m_timelineViewController。
+ *
+ * 为什么用 KVC 而不是 object_setIvar：ivar 是 strong，KVC 会按 strong 语义处理；
+ * 而且我们自己也持有这个实例（retainedTimeline），不会出现悬垂。
+ * 槽里已经有微信自己建的实例时不覆盖。
+ */
+- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage {
+    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+    if (!timeline || !discover) return;
+
+    Ivar ivar = class_getInstanceVariable(object_getClass(discover), kWQMMomentsCachedIvar);
+    if (!ivar) {
+        WQMLog(@"discover page has no %s", kWQMMomentsCachedIvar);
+        return;
+    }
+
+    @try {
+        id existing = object_getIvar(discover, ivar);
+        if (existing) return;
+    } @catch (NSException *exception) {
+        /* 读不到就当空的处理 */
+    }
+
+    @try {
+        [discover setValue:timeline
+                    forKey:[NSString stringWithUTF8String:kWQMMomentsCachedIvar]];
+        WQMLog(@"stored timeline into discover page cache");
+    } @catch (NSException *exception) {
+        WQMLog(@"store timeline failed: %@", exception.reason);
+    }
 }
 
 @end
