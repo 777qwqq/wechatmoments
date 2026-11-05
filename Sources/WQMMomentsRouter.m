@@ -789,7 +789,8 @@ static BOOL wqm_timeline_reusable(UIViewController *controller) {
      * 已读位置都准备好，裸 alloc 恰恰缺了这一步。
      */
     if (![value isKindOfClass:[UIViewController class]]) {
-        for (NSString *key in @[@"timelineViewController", kWQMMomentsCachedIvar]) {
+        for (NSString *key in @[@"timelineViewController",
+                                [NSString stringWithUTF8String:kWQMMomentsCachedIvar]]) {
             @try {
                 id candidate = [discover valueForKey:key];
                 if ([candidate isKindOfClass:[UIViewController class]]) {
