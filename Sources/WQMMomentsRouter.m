@@ -65,7 +65,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 /* 与上面配套的那条导航栈，退出后一起留着。 */
 @property (nonatomic, strong) UINavigationController *retainedNavigation;
 
-- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage;
+- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage:(UIViewController *)discover;
 - (UINavigationController *)reusableNavigationFor:(UIViewController *)controller;
 @end
 
@@ -205,7 +205,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     [WQMTouchShield installForDuration:0.25];
 
     WQMLog(@"enter moments via %@ (nav %@, frame %@)",
-           NSStringFromClass(controller.class), NSStringFromClass(navClass),
+           NSStringFromClass(controller.class), NSStringFromClass(navigationController.class),
            NSStringFromCGRect(navigationController.view.frame));
 
     [self scheduleBadgeClear];
@@ -778,7 +778,8 @@ static BOOL wqm_timeline_reusable(UIViewController *controller) {
      * 让微信后续的"从朋友圈返回 / 更新红点"也能找到这个实例。
      */
     self.retainedTimeline = controller;
-    [self storeTimeline:controller onDiscoverPage];
+    [self storeTimeline:controller
+          onDiscoverPage:[[WQMTabBarBridge shared] discoverController]];
     return controller;
 }
 
@@ -789,8 +790,7 @@ static BOOL wqm_timeline_reusable(UIViewController *controller) {
  * 而且我们自己也持有这个实例（retainedTimeline），不会出现悬垂。
  * 槽里已经有微信自己建的实例时不覆盖。
  */
-- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage {
-    UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
+- (void)storeTimeline:(UIViewController *)timeline onDiscoverPage:(UIViewController *)discover {
     if (!timeline || !discover) return;
 
     Ivar ivar = class_getInstanceVariable(object_getClass(discover), kWQMMomentsCachedIvar);
