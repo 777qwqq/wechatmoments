@@ -213,7 +213,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 
     [self runEntryTransitionInHost:host navigation:navigationController];
 
-    [WQMTouchShield installForDuration:0.35];
+    [WQMTouchShield installForDuration:0.25];
 
     WQMLog(@"enter moments via %@ (nav %@, frame %@)",
            NSStringFromClass(controller.class), NSStringFromClass(navigationController.class),
@@ -229,9 +229,9 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
  * 进入和退出是同一条位移，只是方向相反：朋友圈整屏从右侧滑入、再滑回右侧。
  * 下层完全不动，不压暗、不投影 —— 屏幕上不会出现任何多余的色带。
  *
- * 0.35s / ease-in-out 就是 UIKit push 的默认值。
+ * 0.2s / ease-in-out，比 UIKit 默认的 0.35s 更跟手，和返回保持对称。
  */
-static const NSTimeInterval kWQMPushDuration = 0.35;
+static const NSTimeInterval kWQMPushDuration = 0.2;
 
 - (void)runEntryTransitionInHost:(UITabBarController *)host
                       navigation:(UINavigationController *)navigation {
