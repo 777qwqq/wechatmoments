@@ -72,8 +72,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 - (void)runExitTransitionInHost:(UITabBarController *)host
                      navigation:(UINavigationController *)navigation
                        teardown:(void (^)(void))teardown;
-- (UIView *)attachDimmingToView:(UIView *)under;
-- (UIView *)underlyingContentViewInHost:(UITabBarController *)host;
 @end
 
 @implementation WQMMomentsRouter
@@ -228,49 +226,12 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 #pragma mark - 转场动画
 
 /*
- * 原生是用 push 进朋友圈的：新页面从右侧滑入，下层页面同步左移约三成，
- * 两层之间压一道阴影。我们不是真的 push（朋友圈挂在独立导航栈上、整屏覆盖 tab 容器），
- * 所以用同一套时长和曲线自己演一遍，观感才不"生硬"。
+ * 进入和退出是同一条位移，只是方向相反：朋友圈整屏从右侧滑入、再滑回右侧。
+ * 下层完全不动，不压暗、不投影 —— 屏幕上不会出现任何多余的色带。
  *
  * 0.35s / ease-in-out 就是 UIKit push 的默认值。
  */
 static const NSTimeInterval kWQMPushDuration = 0.35;
-static const CGFloat kWQMPushParallax = 0.28;
-/* 原生 push 时下层大约暗 5%~8%，这里取中间值。 */
-static const CGFloat kWQMPushDim = 0.06;
-
-/*
- * 原生的做法是"下层压暗"，新页面本身不带阴影（iOS 13 起就没有那条黑缝了）。
- *
- * 之前用 layer.shadow 模拟两层之间的缝：偏移 -3、模糊 10、不透明度 0.18，
- * 在浅色底上等于一条 13pt 宽的黑色渐变，正好贴在屏幕左边缘 —— 这就是黑边。
- * 更糟的是清理分支里也判断了 masksToBounds，微信中途把它改成 YES 的话阴影删不掉，
- * 于是一次进入之后就一直挂着。
- *
- * 现在只动下层的亮度，不碰任何 layer 的阴影属性，边缘不可能再出现黑边。
- */
-- (UIView *)attachDimmingToView:(UIView *)under {
-    if (!under) return nil;
-    UIView *dim = [[UIView alloc] initWithFrame:under.bounds];
-    dim.backgroundColor = [UIColor blackColor];
-    dim.alpha = 0.0;
-    dim.userInteractionEnabled = NO;
-    dim.autoresizingMask =
-        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [under addSubview:dim];
-    return dim;
-}
-
-/*
- * 视差的下层：当前 tab 的内容视图。
- * 底栏不参与 —— iOS 原生 push 时 tab bar 是钉住不动的。
- */
-- (UIView *)underlyingContentViewInHost:(UITabBarController *)host {
-    UIViewController *selected = host.selectedViewController;
-    if (!selected) return nil;
-    if (!selected.isViewLoaded) return nil;
-    return selected.view;
-}
 
 - (void)runEntryTransitionInHost:(UITabBarController *)host
                       navigation:(UINavigationController *)navigation {
@@ -285,29 +246,20 @@ static const CGFloat kWQMPushDim = 0.06;
         return;
     }
 
-    [container layoutIfNeeded];
-    UIView *under = [self underlyingContentViewInHost:host];
-
+    /*
+     * 只做一件事：朋友圈从右侧滑入。
+     * 下层不动、不压暗、不投影 —— 和返回时的动作完全对称。
+     */
     view.transform = CGAffineTransformMakeTranslation(width, 0);
-    UIView *dim = [self attachDimmingToView:under];
 
     [UIView animateWithDuration:kWQMPushDuration
                           delay:0.0
                         options:UIViewAnimationOptionCurveEaseInOut
                      animations:^{
         view.transform = CGAffineTransformIdentity;
-        under.transform =
-            CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
-        dim.alpha = kWQMPushDim;
     } completion:^(BOOL finished) {
         view.transform = CGAffineTransformIdentity;
-        /*
-         * 下层立刻复位：此刻它被整屏朋友圈盖住，看不到这一下。
-         * 画面上真正"记住"视差的是朋友圈自己的位置。
-         */
-        under.transform = CGAffineTransformIdentity;
-        [dim removeFromSuperview];
-        /* 原生也是 push 完成、页面铺满之后底栏才消失。 */
+        /* 页面铺满之后底栏才收，和原生一致。 */
         [bridge setTabBarHidden:YES];
     }];
 }
@@ -336,22 +288,13 @@ static const CGFloat kWQMPushDim = 0.06;
     }
     [container layoutIfNeeded];
 
-    UIView *under = [self underlyingContentViewInHost:host];
-    under.transform = CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
-    UIView *dim = [self attachDimmingToView:under];
-    dim.alpha = kWQMPushDim;
-
     [UIView animateWithDuration:kWQMPushDuration
                           delay:0.0
                         options:UIViewAnimationOptionCurveEaseInOut
                      animations:^{
         view.transform = CGAffineTransformMakeTranslation(width, 0);
-        under.transform = CGAffineTransformIdentity;
-        dim.alpha = 0.0;
     } completion:^(BOOL finished) {
         view.transform = CGAffineTransformIdentity;
-        under.transform = CGAffineTransformIdentity;
-        [dim removeFromSuperview];
         teardown();
     }];
 }
