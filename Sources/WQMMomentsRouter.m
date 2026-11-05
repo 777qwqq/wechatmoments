@@ -67,6 +67,14 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 
 - (void)storeTimeline:(UIViewController *)timeline onDiscoverPage:(UIViewController *)discover;
 - (UINavigationController *)reusableNavigationFor:(UIViewController *)controller;
+- (void)runEntryTransitionInHost:(UITabBarController *)host
+                      navigation:(UINavigationController *)navigation;
+- (void)runExitTransitionInHost:(UITabBarController *)host
+                     navigation:(UINavigationController *)navigation
+                       teardown:(void (^)(void))teardown;
+- (void)applyPushShadowTo:(UIView *)view;
+- (void)removePushShadowFrom:(UIView *)view;
+- (UIView *)underlyingContentViewInHost:(UITabBarController *)host;
 @end
 
 @implementation WQMMomentsRouter
@@ -190,7 +198,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 
     [self configureNavigationBarOf:navigationController];
     [self installBackSwipeOn:navigationController.view];
-    [bridge setTabBarHidden:YES];
 
     /*
      * 手动 addChild 不会自动走 appearance 生命周期，
@@ -198,11 +205,18 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
      */
     [host addChildViewController:navigationController];
     [navigationController beginAppearanceTransition:YES animated:NO];
+
+    /* 先挪到右侧屏外再挂，避免挂上去的那一帧闪一下完整页面。 */
+    navigationController.view.transform =
+        CGAffineTransformMakeTranslation(CGRectGetWidth(host.view.bounds), 0);
     [host.view addSubview:navigationController.view];
+
     [navigationController endAppearanceTransition];
     [navigationController didMoveToParentViewController:host];
 
-    [WQMTouchShield installForDuration:0.25];
+    [self runEntryTransitionInHost:host navigation:navigationController];
+
+    [WQMTouchShield installForDuration:0.35];
 
     WQMLog(@"enter moments via %@ (nav %@, frame %@)",
            NSStringFromClass(controller.class), NSStringFromClass(navigationController.class),
@@ -210,6 +224,131 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 
     [self scheduleBadgeClear];
     [self verifyPresentation];
+}
+
+#pragma mark - 转场动画
+
+/*
+ * 原生是用 push 进朋友圈的：新页面从右侧滑入，下层页面同步左移约三成，
+ * 两层之间压一道阴影。我们不是真的 push（朋友圈挂在独立导航栈上、整屏覆盖 tab 容器），
+ * 所以用同一套时长和曲线自己演一遍，观感才不"生硬"。
+ *
+ * 0.35s / ease-in-out 就是 UIKit push 的默认值。
+ */
+static const NSTimeInterval kWQMPushDuration = 0.35;
+static const CGFloat kWQMPushParallax = 0.28;
+
+- (void)applyPushShadowTo:(UIView *)view {
+    if (!view) return;
+    CALayer *layer = view.layer;
+    /* 被裁掉的容器加阴影没有意义，别为了阴影去改别人的 masksToBounds。 */
+    if (layer.masksToBounds) return;
+    layer.shadowColor = [UIColor blackColor].CGColor;
+    layer.shadowOpacity = 0.18f;
+    layer.shadowRadius = 10.0;
+    layer.shadowOffset = CGSizeMake(-3.0, 0.0);
+    layer.shadowPath = [UIBezierPath bezierPathWithRect:view.bounds].CGPath;
+}
+
+- (void)removePushShadowFrom:(UIView *)view {
+    if (!view) return;
+    CALayer *layer = view.layer;
+    if (layer.masksToBounds) return;
+    layer.shadowOpacity = 0.0f;
+    layer.shadowPath = NULL;
+}
+
+/*
+ * 视差的下层：当前 tab 的内容视图。
+ * 底栏不参与 —— iOS 原生 push 时 tab bar 是钉住不动的。
+ */
+- (UIView *)underlyingContentViewInHost:(UITabBarController *)host {
+    UIViewController *selected = host.selectedViewController;
+    if (!selected) return nil;
+    if (!selected.isViewLoaded) return nil;
+    return selected.view;
+}
+
+- (void)runEntryTransitionInHost:(UITabBarController *)host
+                      navigation:(UINavigationController *)navigation {
+    UIView *view = navigation.view;
+    UIView *container = host.view;
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+
+    CGFloat width = container ? CGRectGetWidth(container.bounds) : 0;
+    if (!view || !container || width <= 0) {
+        view.transform = CGAffineTransformIdentity;
+        [bridge setTabBarHidden:YES];
+        return;
+    }
+
+    [container layoutIfNeeded];
+    UIView *under = [self underlyingContentViewInHost:host];
+
+    view.transform = CGAffineTransformMakeTranslation(width, 0);
+    [self applyPushShadowTo:view];
+
+    [UIView animateWithDuration:kWQMPushDuration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        view.transform = CGAffineTransformIdentity;
+        under.transform =
+            CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
+    } completion:^(BOOL finished) {
+        view.transform = CGAffineTransformIdentity;
+        /*
+         * 下层立刻复位：此刻它被整屏朋友圈盖住，看不到这一下。
+         * 画面上真正"记住"视差的是朋友圈自己的位置。
+         */
+        under.transform = CGAffineTransformIdentity;
+        [self removePushShadowFrom:view];
+        /* 原生也是 push 完成、页面铺满之后底栏才消失。 */
+        [bridge setTabBarHidden:YES];
+    }];
+}
+
+- (void)runExitTransitionInHost:(UITabBarController *)host
+                     navigation:(UINavigationController *)navigation
+                       teardown:(void (^)(void))teardown {
+    UIView *view = navigation.view;
+    UIView *container = host.view;
+    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
+
+    CGFloat width = container ? CGRectGetWidth(container.bounds) : 0;
+    if (!view || !container || width <= 0) {
+        teardown();
+        return;
+    }
+
+    /*
+     * 目标页面先在朋友圈背后摆好：切回消息主页、底栏恢复。
+     * 这一步整屏被朋友圈盖着看不见，等它滑走时露出来的就是最终状态，不会闪。
+     */
+    [bridge setTabBarHidden:NO];
+    [bridge forceDiscoverHighlight:NO];
+    if (host.selectedIndex != bridge.messageIndex) {
+        host.selectedIndex = bridge.messageIndex;
+    }
+    [container layoutIfNeeded];
+
+    UIView *under = [self underlyingContentViewInHost:host];
+    under.transform = CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
+
+    [self applyPushShadowTo:view];
+
+    [UIView animateWithDuration:kWQMPushDuration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseInOut
+                     animations:^{
+        view.transform = CGAffineTransformMakeTranslation(width, 0);
+        under.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL finished) {
+        view.transform = CGAffineTransformIdentity;
+        under.transform = CGAffineTransformIdentity;
+        [self removePushShadowFrom:view];
+        teardown();
+    }];
 }
 
 #pragma mark - 顶栏与返回
@@ -536,17 +675,17 @@ static BOOL *wqm_in_timeline_slot(id discover) {
      * 提前做的话，底栏会在朋友圈还在往右滑的时候先冒出来。
      */
     void (^teardown)(void) = ^{
-        [navigation willMoveToParentViewController:nil];
-        [navigation.view removeFromSuperview];
-        [navigation endAppearanceTransition];
-        [navigation removeFromParentViewController];
-
         [bridge setTabBarHidden:NO];
         [bridge forceDiscoverHighlight:NO];
 
         if (host && host.selectedIndex != bridge.messageIndex) {
             host.selectedIndex = bridge.messageIndex;
         }
+
+        [navigation willMoveToParentViewController:nil];
+        [navigation.view removeFromSuperview];
+        [navigation endAppearanceTransition];
+        [navigation removeFromParentViewController];
 
         self.hostNavigation = nil;
         self.hostParent = nil;
@@ -559,15 +698,7 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     [navigation beginAppearanceTransition:NO animated:animated];
 
     if (animated && navigation.view.superview) {
-        [UIView animateWithDuration:0.22
-                              delay:0.0
-                            options:UIViewAnimationOptionCurveEaseOut
-                         animations:^{
-            navigation.view.transform =
-                CGAffineTransformMakeTranslation(CGRectGetWidth(navigation.view.bounds), 0);
-        } completion:^(BOOL finished) {
-            teardown();
-        }];
+        [self runExitTransitionInHost:host navigation:navigation teardown:teardown];
         return;
     }
 

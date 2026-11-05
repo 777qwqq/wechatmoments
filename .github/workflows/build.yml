@@ -83,6 +83,27 @@ jobs:
           echo "=== .deb files ==="
           find ./packages -name "*.deb" -type f
 
+      - name: Recompress Package (xz -9e)
+        run: |
+          set -euo pipefail
+          for deb in ./packages/*.deb; do
+            [ -f "$deb" ] || continue
+            echo "::group::recompressing $deb"
+            echo "before: $(ls -lh "$deb" | awk '{print $5}')"
+            work="$(mktemp -d)"
+            dpkg-deb --raw-extract "$deb" "$work/pkg"
+            out="$work/$(basename "$deb")"
+            # -Sextreme 是 xz 的极限模式，配合 -z9 就是 dpkg 能给出的最高压缩级别
+            if ! dpkg-deb --build --root-owner-group -Zxz -z9 -Sextreme "$work/pkg" "$out" 2>/dev/null; then
+              echo "extreme mode unavailable, falling back to -z9"
+              dpkg-deb --build --root-owner-group -Zxz -z9 "$work/pkg" "$out"
+            fi
+            mv "$out" "$deb"
+            rm -rf "$work"
+            echo "after: $(ls -lh "$deb" | awk '{print $5}')"
+            echo "::endgroup::"
+          done
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
