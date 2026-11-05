@@ -95,8 +95,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
     if (!discover) return;
 
-    BOOL asked = wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
-    WQMLog(@"settle before exit: onTimeLineViewReturn=%d", asked);
+    wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
 }
 
 /*
@@ -127,11 +126,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     int before = (int)MAX(0LL, [bridge discoverUnreadCount]);
     [self openLedgerFrom:before];
 
-    UIViewController *discover = [bridge discoverController];
-    BOOL asked = wqm_invoke_noarg(discover, @"onTimeLineViewReturn");
-    WQMLog(@"native settle #%ld: onTimeLineViewReturn=%d (discover %@, unread %d)",
-           (long)self.clearAttempts, asked,
-           discover ? NSStringFromClass(discover.class) : @"nil", before);
+    wqm_invoke_noarg([bridge discoverController], @"onTimeLineViewReturn");
 
     __weak typeof(self) weakSelf = self;
 
@@ -149,16 +144,14 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
          * 第二轮不再重复催 onTimeLineViewReturn，而是把发现页上"朋友圈红点"
          * 这一个开关关掉，再让它按剩余子项重算 —— 视频号 / 直播的未读不动。
          */
-        BOOL flagged = [self clearMomentsDotOnDiscoverPage];
-        BOOL recomputed = [self requestAggregateRecompute];
+        [self clearMomentsDotOnDiscoverPage];
+        [self requestAggregateRecompute];
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
             if (!self) return;
             if (![[WQMTabBarBridge shared] discoverBadgeVisible]) {
-                WQMLog(@"badge cleared via discover flag (flag=%d recompute=%d)",
-                       flagged, recomputed);
                 return;
             }
             if (self.clearAttempts < 3) {
@@ -218,15 +211,13 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     UITabBarController *controller = bridge.tabBarController;
     NSUInteger index = bridge.discoverIndex;
 
-    BOOL called = NO;
     SEL removeSel = NSSelectorFromString(@"removeRedDotOnTabBarItemAtIndex:");
     if (controller && index != NSUIntegerMax && [controller respondsToSelector:removeSel]) {
         @try {
             ((void (*)(id, SEL, unsigned long long))objc_msgSend)(
                 controller, removeSel, (unsigned long long)index);
-            called = YES;
         } @catch (NSException *exception) {
-            called = NO;
+            /* 这个版本没有该入口就跳过 */
         }
     }
 
@@ -251,10 +242,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     }
 
     [self openLedgerFrom:before];
-    BOOL still = [bridge discoverBadgeVisible];
-    WQMLog(@"removeDiscoverRedDot called=%d itemView=%@ stillVisible=%d",
-           called, itemView ? @"yes" : @"no", still);
-    return !still;
+    return ![bridge discoverBadgeVisible];
 }
 
 - (void)openLedgerFrom:(int)before {
