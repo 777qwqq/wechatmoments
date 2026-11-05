@@ -154,6 +154,14 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
             if (![[WQMTabBarBridge shared] discoverBadgeVisible]) {
                 return;
             }
+            /*
+             * 最后一轮：微信的结算链路没走到（版本改了内部方法时常见），
+             * 直接把发现页这一格的红点压掉。视频号 / 直播的真实未读
+             * 会在微信下一次汇总时重新点回来，不会被永久抹掉。
+             */
+            if (self.clearAttempts >= 2) {
+                [self removeDiscoverRedDot:before];
+            }
             if (self.clearAttempts < 3) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                              (int64_t)(1.2 * NSEC_PER_SEC)),

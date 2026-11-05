@@ -4,6 +4,7 @@
 
 #import "WQMMomentsRouter.h"
 #import "WQMBadgeCoordinator.h"
+#import "WQMDelegateProxy.h"
 #import "WQMLog.h"
 #import "WQMTabBarBridge.h"
 #import "WQMTouchShield.h"
@@ -47,6 +48,8 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 /* 进入前发现页的原始状态，退出时原样还回去。 */
 @property (nonatomic) BOOL discoverInTimelineBefore;
 @property (nonatomic) BOOL hasDiscoverInTimelineSnapshot;
+/* 朋友圈 delegate 的中间人：转发给微信原对象，同时把已读回调喂给发现页。 */
+@property (nonatomic, strong) WQMDelegateProxy *delegateProxy;
 /* 已经被我们挂过手势的原生返回视图，避免重复添加。 */
 @property (nonatomic, weak) UIView *hijackedBackView;
 /*
@@ -401,14 +404,36 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     }
 
     /*
-     * 不再覆写 timeline.delegate。
+     * delegate 用 proxy 接管，不直接换成发现页。
      *
-     * 8.0.54/55 上把 delegate 指到发现页是清红点的关键，但 8.0.80 的朋友圈
-     * 在 cell 配置阶段会直接向 delegate 发一批协议方法（不先 respondsToSelector），
-     * 发现页不实现就会 unrecognized selector → SIGABRT。
-     * 微信自己会在创建实例时把 delegate 设成正确的对象，动它反而更危险。
-     * 红点改由下面的 m_inTimeline + onTimeLineViewReturn 结算。
+     * 8.0.80 的 cell 配置会直接向 delegate 发协议方法，整个换成发现页必崩；
+     * 但红点的已读结算又确实要发现页收到 onMarkWCObjectAsRead: 这类回调。
+     * proxy 把其余方法原样转发给微信原本的 delegate，只对已读/返回/红点
+     * 这几类选择器额外投递一份给发现页，两边都不耽误。
      */
+    id current = nil;
+    @try {
+        current = [self.momentsController valueForKey:@"delegate"];
+    } @catch (NSException *exception) {
+        current = nil;
+    }
+
+    if (object_getClass(current) == [WQMDelegateProxy class]) {
+        /* 实例复用：沿用原来的 proxy，只更新观察者。 */
+        WQMDelegateProxy *proxy = (WQMDelegateProxy *)current;
+        proxy.observer = discover;
+        self.delegateProxy = proxy;
+    } else {
+        WQMDelegateProxy *proxy = [WQMDelegateProxy proxyWithTarget:current observer:discover];
+        self.delegateProxy = proxy;
+        @try {
+            [self.momentsController setValue:proxy forKey:@"delegate"];
+            WQMLog(@"delegate -> proxy (target %@)",
+                   current ? NSStringFromClass([current class]) : @"nil");
+        } @catch (NSException *exception) {
+            WQMLog(@"bind delegate proxy failed: %@", exception.reason);
+        }
+    }
 
     BOOL *slot = wqm_in_timeline_slot(discover);
     if (slot) {
