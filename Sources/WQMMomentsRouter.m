@@ -760,15 +760,48 @@ static BOOL wqm_timeline_reusable(UIViewController *controller) {
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
     if (!discover) return nil;
 
-    Ivar ivar = class_getInstanceVariable(object_getClass(discover), kWQMMomentsCachedIvar);
-    if (!ivar) return nil;
-
-    id value = nil;
-    @try {
-        value = object_getIvar(discover, ivar);
-    } @catch (NSException *exception) {
-        return nil;
+    /*
+     * 首次点击时发现页通常还没被加载过，微信也就不会提前建好朋友圈实例。
+     * 先把发现页的 view 催出来：缓存槽是在微信自己的加载流程里填的，
+     * 这样我们能拿到"微信亲手创建"的实例，而不是裸 alloc 的半成品。
+     */
+    if (!discover.isViewLoaded) {
+        @try {
+            (void)discover.view;
+        } @catch (NSException *exception) {
+            WQMLog(@"forcing discover load failed: %@", exception.reason);
+        }
     }
+
+    Ivar ivar = class_getInstanceVariable(object_getClass(discover), kWQMMomentsCachedIvar);
+    id value = nil;
+    if (ivar) {
+        @try {
+            value = object_getIvar(discover, ivar);
+        } @catch (NSException *exception) {
+            value = nil;
+        }
+    }
+
+    /*
+     * 槽还是空的：走一次同名 getter，让微信的懒加载自己去建。
+     * 这是"首点不崩"的关键 —— 微信创建实例时会顺带把会话、数据源、
+     * 已读位置都准备好，裸 alloc 恰恰缺了这一步。
+     */
+    if (![value isKindOfClass:[UIViewController class]]) {
+        for (NSString *key in @[@"timelineViewController", kWQMMomentsCachedIvar]) {
+            @try {
+                id candidate = [discover valueForKey:key];
+                if ([candidate isKindOfClass:[UIViewController class]]) {
+                    value = candidate;
+                    break;
+                }
+            } @catch (NSException *exception) {
+                /* 没有这个 key 就跳过 */
+            }
+        }
+    }
+
     if (![value isKindOfClass:[UIViewController class]]) return nil;
 
     UIViewController *candidate = (UIViewController *)value;
@@ -814,8 +847,17 @@ static BOOL wqm_timeline_reusable(UIViewController *controller) {
 
     if (![controller isKindOfClass:[UIViewController class]]) return nil;
 
-    /* 触发一次 view 加载，避免首帧尺寸为 0 时布局错乱。 */
-    (void)controller.view;
+    /*
+     * 触发一次 view 加载，避免首帧尺寸为 0 时布局错乱。
+     * 首次冷启动时微信的数据层可能还没完全就绪，这里失败就直接放弃、
+     * 让调用方回退到原生发现页 —— 宁可少一次直达，也不要闪退。
+     */
+    @try {
+        (void)controller.view;
+    } @catch (NSException *exception) {
+        WQMLog(@"timeline view load failed: %@", exception.reason);
+        return nil;
+    }
 
     /*
      * 新建之后养起来：自己持有一份，同时塞回发现页的缓存槽，

@@ -1,6 +1,6 @@
 Package: cn.qwq.wechatmoments
 Name: 微信朋友圈入口
-Version: 1.1.1
+Version: 1.1.2
 Architecture: iphoneos-arm
 Description: 底栏「发现」单击直达朋友圈，返回后落回消息主页；长按打开原「发现」页；无设置，无效请删除。
 Maintainer: 777qwq
