@@ -72,8 +72,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 - (void)runExitTransitionInHost:(UITabBarController *)host
                      navigation:(UINavigationController *)navigation
                        teardown:(void (^)(void))teardown;
-- (void)applyPushShadowTo:(UIView *)view;
-- (void)removePushShadowFrom:(UIView *)view;
+- (UIView *)attachDimmingToView:(UIView *)under;
 - (UIView *)underlyingContentViewInHost:(UITabBarController *)host;
 @end
 
@@ -237,25 +236,29 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
  */
 static const NSTimeInterval kWQMPushDuration = 0.35;
 static const CGFloat kWQMPushParallax = 0.28;
+/* 原生 push 时下层大约暗 5%~8%，这里取中间值。 */
+static const CGFloat kWQMPushDim = 0.06;
 
-- (void)applyPushShadowTo:(UIView *)view {
-    if (!view) return;
-    CALayer *layer = view.layer;
-    /* 被裁掉的容器加阴影没有意义，别为了阴影去改别人的 masksToBounds。 */
-    if (layer.masksToBounds) return;
-    layer.shadowColor = [UIColor blackColor].CGColor;
-    layer.shadowOpacity = 0.18f;
-    layer.shadowRadius = 10.0;
-    layer.shadowOffset = CGSizeMake(-3.0, 0.0);
-    layer.shadowPath = [UIBezierPath bezierPathWithRect:view.bounds].CGPath;
-}
-
-- (void)removePushShadowFrom:(UIView *)view {
-    if (!view) return;
-    CALayer *layer = view.layer;
-    if (layer.masksToBounds) return;
-    layer.shadowOpacity = 0.0f;
-    layer.shadowPath = NULL;
+/*
+ * 原生的做法是"下层压暗"，新页面本身不带阴影（iOS 13 起就没有那条黑缝了）。
+ *
+ * 之前用 layer.shadow 模拟两层之间的缝：偏移 -3、模糊 10、不透明度 0.18，
+ * 在浅色底上等于一条 13pt 宽的黑色渐变，正好贴在屏幕左边缘 —— 这就是黑边。
+ * 更糟的是清理分支里也判断了 masksToBounds，微信中途把它改成 YES 的话阴影删不掉，
+ * 于是一次进入之后就一直挂着。
+ *
+ * 现在只动下层的亮度，不碰任何 layer 的阴影属性，边缘不可能再出现黑边。
+ */
+- (UIView *)attachDimmingToView:(UIView *)under {
+    if (!under) return nil;
+    UIView *dim = [[UIView alloc] initWithFrame:under.bounds];
+    dim.backgroundColor = [UIColor blackColor];
+    dim.alpha = 0.0;
+    dim.userInteractionEnabled = NO;
+    dim.autoresizingMask =
+        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [under addSubview:dim];
+    return dim;
 }
 
 /*
@@ -286,7 +289,7 @@ static const CGFloat kWQMPushParallax = 0.28;
     UIView *under = [self underlyingContentViewInHost:host];
 
     view.transform = CGAffineTransformMakeTranslation(width, 0);
-    [self applyPushShadowTo:view];
+    UIView *dim = [self attachDimmingToView:under];
 
     [UIView animateWithDuration:kWQMPushDuration
                           delay:0.0
@@ -295,6 +298,7 @@ static const CGFloat kWQMPushParallax = 0.28;
         view.transform = CGAffineTransformIdentity;
         under.transform =
             CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
+        dim.alpha = kWQMPushDim;
     } completion:^(BOOL finished) {
         view.transform = CGAffineTransformIdentity;
         /*
@@ -302,7 +306,7 @@ static const CGFloat kWQMPushParallax = 0.28;
          * 画面上真正"记住"视差的是朋友圈自己的位置。
          */
         under.transform = CGAffineTransformIdentity;
-        [self removePushShadowFrom:view];
+        [dim removeFromSuperview];
         /* 原生也是 push 完成、页面铺满之后底栏才消失。 */
         [bridge setTabBarHidden:YES];
     }];
@@ -334,8 +338,8 @@ static const CGFloat kWQMPushParallax = 0.28;
 
     UIView *under = [self underlyingContentViewInHost:host];
     under.transform = CGAffineTransformMakeTranslation(-width * kWQMPushParallax, 0);
-
-    [self applyPushShadowTo:view];
+    UIView *dim = [self attachDimmingToView:under];
+    dim.alpha = kWQMPushDim;
 
     [UIView animateWithDuration:kWQMPushDuration
                           delay:0.0
@@ -343,10 +347,11 @@ static const CGFloat kWQMPushParallax = 0.28;
                      animations:^{
         view.transform = CGAffineTransformMakeTranslation(width, 0);
         under.transform = CGAffineTransformIdentity;
+        dim.alpha = 0.0;
     } completion:^(BOOL finished) {
         view.transform = CGAffineTransformIdentity;
         under.transform = CGAffineTransformIdentity;
-        [self removePushShadowFrom:view];
+        [dim removeFromSuperview];
         teardown();
     }];
 }
