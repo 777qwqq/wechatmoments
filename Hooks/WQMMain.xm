@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 
 #import "WQMBadgeCoordinator.h"
-#import "WQMConfig.h"
 #import "WQMLog.h"
 #import "WQMMomentsRouter.h"
 #import "WQMTabBarBridge.h"
@@ -158,10 +157,6 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
 %hook UITabBarItem
 
 - (void)setBadgeValue:(NSString *)badgeValue {
-    if (![[WQMConfig wqm_shared] wqm_isEnabled]) {
-        %orig;
-        return;
-    }
     NSString *adjusted = [[WQMBadgeCoordinator shared] adjustedBadgeValue:badgeValue forItem:self];
     %orig(adjusted);
 }
@@ -214,14 +209,3 @@ static BOOL wqm_intercept_selection(NSUInteger index) {
 }
 
 %end
-
-%ctor {
-    @autoreleasepool {
-        WQMConfig *config = [WQMConfig wqm_shared];
-        wqm_log_set_enabled([config wqm_boolForKey:@"verboseLog" defaultValue:YES]);
-        WQMLog(@"loaded (enabled=%d), WCTimeLineViewController %@",
-               [config wqm_isEnabled],
-               NSClassFromString(@"WCTimeLineViewController") ? @"found" : @"MISSING");
-        WQMLog(@"log file: %@", wqm_log_file_path());
-    }
-}

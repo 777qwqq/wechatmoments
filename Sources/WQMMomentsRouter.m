@@ -4,14 +4,9 @@
 
 #import "WQMMomentsRouter.h"
 #import "WQMBadgeCoordinator.h"
-#import "WQMConfig.h"
 #import "WQMLog.h"
 #import "WQMTabBarBridge.h"
 #import "WQMTouchShield.h"
-
-static NSString * const kKeyLearnedMomentsClass = @"learnedMomentsClass";
-static NSString * const kKeyMomentsClass = @"momentsClass";
-static NSString * const kKeyExtraClasses = @"extraMomentsClasses";
 
 /* 微信 8.0.5x 的真实类名（来自 class-dump 头文件，8.0.54 / 8.0.55 一致）。 */
 static NSString * const kWQMMomentsControllerClass = @"WCTimeLineViewController";
@@ -88,8 +83,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 #pragma mark - 入口
 
 - (void)handleDiscoverTap {
-    if (![[WQMConfig wqm_shared] wqm_isEnabled]) return;
-
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     [bridge refresh];
 
@@ -306,20 +299,12 @@ static const NSTimeInterval kWQMPushDuration = 0.2;
  * 右上角相机。这里只补"返回"这一半，其余交给朋友圈自己画。
  */
 - (void)configureNavigationBarOf:(UINavigationController *)navigationController {
-    BOOL hideBar = [[WQMConfig wqm_shared] wqm_boolForKey:@"hideHostNavBar" defaultValue:NO];
-    navigationController.navigationBarHidden = hideBar;
-    if (hideBar) {
-        WQMLog(@"host nav bar hidden by config; back is edge-swipe only");
-        return;
-    }
-
     UINavigationBar *bar = navigationController.navigationBar;
     [bar setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
     [bar setShadowImage:[UIImage new]];
     bar.translucent = YES;
     bar.tintColor = [UIColor whiteColor];
 
-    if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
     [self ensureBackButton];
 }
 
@@ -370,8 +355,6 @@ static const NSTimeInterval kWQMPushDuration = 0.2;
     UIViewController *timeline = self.momentsController;
     UINavigationController *navigation = self.hostNavigation;
     if (!timeline || !navigation) return;
-    if (![[WQMConfig wqm_shared] wqm_boolForKey:@"showBackButton" defaultValue:YES]) return;
-
     if (navigation.navigationBarHidden) return;
 
     /*
@@ -720,38 +703,20 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 - (Class)resolvedMomentsClass {
     if (self.resolvedClass) return self.resolvedClass;
 
-    WQMConfig *config = [WQMConfig wqm_shared];
-
-    NSMutableArray<NSString *> *names = [NSMutableArray array];
-    NSString *extra = [config wqm_stringForKey:kKeyExtraClasses defaultValue:@""];
-    if (extra.length) {
-        for (NSString *piece in [extra componentsSeparatedByString:@","]) {
-            NSString *trimmed = [piece stringByTrimmingCharactersInSet:
-                                 [NSCharacterSet whitespaceCharacterSet]];
-            if (trimmed.length) [names addObject:trimmed];
-        }
-    }
-    [names addObject:[config wqm_stringForKey:kKeyMomentsClass defaultValue:@""]];
-    [names addObject:[config wqm_stringForKey:kKeyLearnedMomentsClass defaultValue:@""]];
-
-    [names addObject:kWQMMomentsControllerClass];
-    /* 旧版本 / 改版后的兜底名，命中即用。 */
-    [names addObjectsFromArray:@[
-        @"WCTimeLineViewController",
+    /* 8.0.5x 是第一个；后两个是旧版 / 改版后的兜底名，命中哪个用哪个。 */
+    NSArray<NSString *> *names = @[
+        kWQMMomentsControllerClass,
         @"WCMomentsTimelineViewController",
         @"MMMomentsViewController"
-    ]];
+    ];
 
     for (NSString *name in names) {
         Class candidate = [self validClassNamed:name];
         if (candidate) {
-            WQMLog(@"using moments class %@", name);
             self.resolvedClass = candidate;
             return candidate;
         }
     }
-
-    WQMLog(@"no moments class found in runtime");
     return Nil;
 }
 

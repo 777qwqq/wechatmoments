@@ -1,24 +1,10 @@
 #pragma once
 
-#import <Foundation/Foundation.h>
-
 /*
- * 这个头会被 .xm 引用，而 Logos 把 .xm 当 Objective-C++ 编译，
- * 没有 extern "C" 的话符号会被 mangle，链接时找不到 C 侧的实现。
+ * 发布版关闭日志。
+ *
+ * 宏展开成空语句，所有调用点连同格式字符串一起被编译器丢掉：
+ * 不产生字符串常量，也不写盘、不加锁、不起队列。
+ * 需要排查时把这里换成 NSLog 版本重新编译即可。
  */
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-BOOL wqm_log_enabled(void);
-void wqm_log_set_enabled(BOOL enabled);
-void wqm_log_write(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
-
-/* 微信沙盒 tmp/WeChatMoments.log（上限 30KB，超出后保留最新 15KB）。 */
-NSString *wqm_log_file_path(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#define WQMLog(...) do { if (wqm_log_enabled()) wqm_log_write(__VA_ARGS__); } while (0)
+#define WQMLog(...) do {} while (0)

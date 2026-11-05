@@ -2,7 +2,6 @@
 #import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 #import "WQMTabBarBridge.h"
-#import "WQMConfig.h"
 #import "WQMDiscoverPressRecognizer.h"
 #import "WQMLog.h"
 #import "WQMMomentsRouter.h"
@@ -289,8 +288,6 @@ static NSArray *wqm_item_views(UITabBar *bar) {
 #pragma mark - 手势
 
 - (void)installRecognizerIfNeeded {
-    if (![[WQMConfig wqm_shared] wqm_isEnabled]) return;
-
     [self refresh];
 
     UITabBar *bar = self.tabBar;
@@ -306,10 +303,10 @@ static NSArray *wqm_item_views(UITabBar *bar) {
         self.recognizer = nil;
     }
 
-    double holdMilliseconds = [[WQMConfig wqm_shared] wqm_doubleForKey:@"holdDelayMs" defaultValue:400.0];
     WQMDiscoverPressRecognizer *recognizer =
         [[WQMDiscoverPressRecognizer alloc] initWithTarget:nil action:nil];
-    recognizer.holdDelay = MAX(0.2, MIN(0.8, holdMilliseconds / 1000.0));
+    /* 长按 0.4s 触发，短于这个时间归单击。 */
+    recognizer.holdDelay = 0.4;
 
     __weak typeof(self) weakSelf = self;
     recognizer.isInDiscoverSlot = ^BOOL(CGPoint point) {

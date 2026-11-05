@@ -2,9 +2,11 @@
 #import <objc/message.h>
 #import "WQMBadgeCoordinator.h"
 #import "WQMBadgeMath.h"
-#import "WQMConfig.h"
 #import "WQMLog.h"
 #import "WQMTabBarBridge.h"
+
+/* 服务端把旧汇总推回来的窗口：这段时间内只丢弃"和清除前一模一样"的值。 */
+static const double kWQMBadgeLedgerWindow = 5.0;
 
 @interface WQMBadgeCoordinator ()
 @property (nonatomic) BOOL writing;
@@ -256,8 +258,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 - (void)openLedgerFrom:(int)before {
-    double window = [[WQMConfig wqm_shared] wqm_doubleForKey:@"badgeWindow" defaultValue:5.0];
-    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), window);
+    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), kWQMBadgeLedgerWindow);
 }
 
 - (NSString *)adjustedBadgeValue:(NSString *)value forItem:(UITabBarItem *)item {
@@ -308,11 +309,10 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     [self writeDiscoverBadgeString:newValue fallbackItem:item];
     self.writing = NO;
 
-    double window = [[WQMConfig wqm_shared] wqm_doubleForKey:@"badgeWindow" defaultValue:5.0];
-    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), window);
+    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), kWQMBadgeLedgerWindow);
 
     WQMLog(@"badge %d -> %@ (moments unread %ld, window %.1fs)",
-           before, newValue ?: @"nil", (long)moments, window);
+           before, newValue ?: @"nil", (long)moments, kWQMBadgeLedgerWindow);
 }
 
 /* 微信真实底栏只认 MMTabBarItemView，优先走它自己的写入接口。 */
@@ -344,22 +344,13 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 - (BOOL)clearMomentsUnreadAtSource:(UIViewController *)timelineController {
     if (!timelineController) return NO;
 
-    NSString *configured = [[WQMConfig wqm_shared] wqm_stringForKey:@"sourceClearSelectors" defaultValue:@""];
-    NSMutableArray<NSString *> *selectors = [NSMutableArray array];
-    if (configured.length) {
-        for (NSString *piece in [configured componentsSeparatedByString:@","]) {
-            NSString *trimmed = [piece stringByTrimmingCharactersInSet:
-                                 [NSCharacterSet whitespaceCharacterSet]];
-            if (trimmed.length) [selectors addObject:trimmed];
-        }
-    } else {
-        [selectors addObjectsFromArray:@[
-            @"markAllAsRead",
-            @"markTimelineAsRead",
-            @"clearUnread",
-            @"resetUnreadCount"
-        ]];
-    }
+    /* 各版本清未读的入口名不一样，挨个试，命中即止。 */
+    NSArray<NSString *> *selectors = @[
+        @"markAllAsRead",
+        @"markTimelineAsRead",
+        @"clearUnread",
+        @"resetUnreadCount"
+    ];
 
     BOOL cleared = NO;
     for (NSString *selector in selectors) {
