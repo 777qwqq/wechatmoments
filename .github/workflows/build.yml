@@ -42,11 +42,11 @@ jobs:
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> $HOME/.theosrc
 
-      - name: Bump Package Version
+      - name: Resolve Package Version
         id: bump
         run: |
-          BASE_VERSION="$(awk '/^Version:/ {print $2}' control | cut -d- -f1)"
-          VERSION="${BASE_VERSION}-${{ github.run_number }}"
+          # 版本号直接取自 control，不再追加 -run_number 构建号
+          VERSION="$(awk '/^Version:/ {print $2}' control | cut -d- -f1)"
           echo "Using version: $VERSION"
           sed -i '' "s/^Version: .*/Version: ${VERSION}/" control
           echo "package_version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -118,4 +118,6 @@ jobs:
           token: ${{ github.token }}
           tag_name: v${{ steps.bump.outputs.package_version }}
           name: 微信朋友圈入口 v${{ steps.bump.outputs.package_version }}
+          # 版本号固定后可能重复发布同一个 tag，允许覆盖同名附件
+          overwrite_files: true
           files: ./packages/*.deb
