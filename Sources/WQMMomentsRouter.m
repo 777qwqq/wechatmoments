@@ -47,7 +47,6 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 /* 进入前发现页的原始状态，退出时原样还回去。 */
 @property (nonatomic) BOOL discoverInTimelineBefore;
 @property (nonatomic) BOOL hasDiscoverInTimelineSnapshot;
-@property (nonatomic, weak) id previousMomentsDelegate;
 /* 已经被我们挂过手势的原生返回视图，避免重复添加。 */
 @property (nonatomic, weak) UIView *hijackedBackView;
 /*
@@ -401,19 +400,15 @@ static BOOL *wqm_in_timeline_slot(id discover) {
         return;
     }
 
-    /* delegate 是 weak，发现页活着就不会出事。先记住原值，退出时还原。 */
-    @try {
-        self.previousMomentsDelegate = [self.momentsController valueForKey:@"delegate"];
-    } @catch (NSException *exception) {
-        self.previousMomentsDelegate = nil;
-    }
-    @try {
-        [self.momentsController setValue:discover forKey:@"delegate"];
-        WQMLog(@"moments delegate -> %@ (was %@)", NSStringFromClass(discover.class),
-               self.previousMomentsDelegate ? NSStringFromClass([self.previousMomentsDelegate class]) : @"nil");
-    } @catch (NSException *exception) {
-        WQMLog(@"bind moments delegate failed: %@", exception.reason);
-    }
+    /*
+     * 不再覆写 timeline.delegate。
+     *
+     * 8.0.54/55 上把 delegate 指到发现页是清红点的关键，但 8.0.80 的朋友圈
+     * 在 cell 配置阶段会直接向 delegate 发一批协议方法（不先 respondsToSelector），
+     * 发现页不实现就会 unrecognized selector → SIGABRT。
+     * 微信自己会在创建实例时把 delegate 设成正确的对象，动它反而更危险。
+     * 红点改由下面的 m_inTimeline + onTimeLineViewReturn 结算。
+     */
 
     BOOL *slot = wqm_in_timeline_slot(discover);
     if (slot) {
@@ -431,11 +426,10 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
 
     /*
-     * delegate 故意不还原。
-     * 原生朋友圈的 delegate 一直指着发现页，退出后也保持连接（数据变更、红点都靠它）。
-     * 实例会被复用，断开反而会出现"第二次进入已读不结算"的问题。
+     * delegate 从头到尾没动过，这里只还原 m_inTimeline。
+     * 原生朋友圈的 delegate 会一直连着发现页，实例复用期间保持连接才能让
+     * 下一次进入的已读结算继续生效。
      */
-    self.previousMomentsDelegate = nil;
 
     if (discover && self.hasDiscoverInTimelineSnapshot) {
         BOOL *slot = wqm_in_timeline_slot(discover);
