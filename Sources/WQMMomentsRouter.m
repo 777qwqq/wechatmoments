@@ -707,6 +707,20 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     [self exitAnimated:NO reason:@"tab-switch"];
 }
 
+/*
+ * 底栏该不该继续隐藏，只认"朋友圈整层是否真的盖在屏幕上"。
+ *
+ * 不用 showing 布尔直接判断：上次会话若在朋友圈里被切后台 / 被系统杀掉，
+ * showing 与底栏隐藏标志都可能残留成 YES，而那条导航栈其实早已不在 window 上。
+ * 单看标志会把冷启动重建出来的新底栏也一起藏掉，且没有任何退出流程会来复位。
+ */
+- (BOOL)momentsOverlayShouldHideTabBar {
+    if (!self.showing || self.exiting) return NO;
+    if (!self.hostNavigation.isViewLoaded) return NO;
+    UIView *view = self.hostNavigation.view;
+    return view.window != nil && view.superview != nil;
+}
+
 #pragma mark - 生命周期回调
 
 - (void)noteViewControllerAppeared:(UIViewController *)viewController {

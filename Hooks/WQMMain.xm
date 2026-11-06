@@ -29,7 +29,11 @@ static void wqm_notify_selection(NSUInteger index) {
 
 - (void)didMoveToWindow {
     %orig;
-    [[WQMTabBarBridge shared] refresh];
+    /*
+     * 视图层级重建（冷启动 / 内存警告后恢复）时会有新的底栏挂上来。
+     * 强制重新择优一次，避免沿用旧实例导致显隐恢复落到错误对象上。
+     */
+    [[WQMTabBarBridge shared] refreshForcingRescan];
     [[WQMTabBarBridge shared] installRecognizerIfNeeded];
 }
 

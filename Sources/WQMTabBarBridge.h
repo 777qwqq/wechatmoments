@@ -28,6 +28,11 @@
 @property (nonatomic, readonly) BOOL forcingHighlight;
 
 - (void)refresh;
+/*
+ * 底栏视图刚挂到窗口时用它：强制重新择优一次，避免冷启动早期绑到临时/内嵌实例后
+ * "绑上就不重扫"，导致后续恢复显隐时作用到错误对象。
+ */
+- (void)refreshForcingRescan;
 - (void)installRecognizerIfNeeded;
 - (void)layoutDidChange;
 - (BOOL)pointIsInDiscoverSlot:(CGPoint)point;

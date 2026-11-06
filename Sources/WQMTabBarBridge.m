@@ -25,6 +25,12 @@ static NSString * const kWQMMainFrameClassName = @"NewMainFrameViewController";
 @property (nonatomic, readwrite) BOOL forcingHighlight;
 @property (nonatomic, readwrite) BOOL tabBarHidden;
 @property (nonatomic, weak) UIGestureRecognizer *observedSingleTap;
+/*
+ * 所有被我们改过显隐的底栏。weak 集合：bar 释放后自动出列。
+ * 复位时遍历全量，而不是只改当前 self.tabBar —— 冷启动 / 视图层级重建后，
+ * 屏幕上那条 bar 可能已经换成了新实例，只恢复旧对象是没用的。
+ */
+@property (nonatomic, strong) NSHashTable<UITabBar *> *touchedTabBars;
 @end
 
 static BOOL wqm_view_looks_like_tab_bar(UIView *view) {
@@ -121,15 +127,30 @@ static NSArray *wqm_item_views(UITabBar *bar) {
     if (self) {
         _discoverIndex = NSUIntegerMax;
         _messageIndex = 0;
+        _touchedTabBars = [NSHashTable weakObjectsHashTable];
     }
     return self;
 }
 
 #pragma mark - 定位
 
+/*
+ * 底栏视图刚挂到窗口时走这里。视图层级重建后，旧实例可能仍"在 window 上"，
+ * 普通 refresh 会因为短路而不重扫；强制断开再择优，让真正的主 MMTabBar 能被换上来。
+ */
+- (void)refreshForcingRescan {
+    self.tabBar = nil;
+    [self refresh];
+}
+
 - (void)refresh {
     UITabBar *bar = self.tabBar;
-    if (!bar || !bar.window) {
+    /*
+     * 冷启动早期 items 还没赋值时，容易绑到临时 / 内嵌的 tab bar。
+     * 只有当前 bar 确实在窗口上且 items 已就绪才短路，否则重新扫一次择优，
+     * 免得错误实例一直留着、退出时显隐恢复落到错对象上。
+     */
+    if (!bar || !bar.window || bar.items.count == 0) {
         NSMutableArray<UIView *> *candidates = [NSMutableArray array];
         for (UIWindow *window in [UIApplication sharedApplication].windows) {
             wqm_collect_tab_bars(window, 0, candidates);
@@ -366,9 +387,24 @@ static NSArray *wqm_item_views(UITabBar *bar) {
 }
 
 - (void)layoutDidChange {
-    if (self.tabBarHidden) {
+    /*
+     * 底栏隐藏只该存在于"朋友圈整层真的盖在屏幕上"期间。
+     *
+     * 命门：tabBarHidden 是个独立布尔标志，跟那层视图是否在屏完全脱钩。
+     * 上次退出被打断 / 冷启动视图重建后，标志会残留成 YES，旧逻辑会在
+     * 每一次 layout 里把隐藏施加到（可能是新建的）当前 bar 上，而此时
+     * 没有任何退出流程会来复位 —— 底栏就永久消失了。
+     *
+     * 现在：朋友圈那层不在屏上就不施加隐藏；标志若还残留，第一帧主动复位。
+     * 这样冷启动第一帧就自愈，不再依赖"必须完整走完退出 teardown"。
+     */
+    BOOL keepHidden = [[WQMMomentsRouter shared] momentsOverlayShouldHideTabBar];
+    if (self.tabBarHidden && !keepHidden) {
+        [self setTabBarHidden:NO];
+    } else if (self.tabBarHidden) {
         [self applyTabBarHidden];
     }
+
     if (self.forcingHighlight) {
         [self applyItemViewSelection];
     }
@@ -503,11 +539,9 @@ static NSArray *wqm_item_views(UITabBar *bar) {
  * 同时把 alpha 和交互关掉，等于给底栏加了一个"隐形"状态，
  * 这样即使它中途 layout 一次也不会闪出来、更不会接走那次触摸。
  */
-- (void)applyTabBarHidden {
-    UITabBar *bar = self.tabBar;
+- (void)applyHidden:(BOOL)hidden toBar:(UITabBar *)bar {
     if (!bar) return;
-
-    if (self.tabBarHidden) {
+    if (hidden) {
         bar.hidden = YES;
         bar.alpha = 0.0;
         bar.userInteractionEnabled = NO;
@@ -516,6 +550,33 @@ static NSArray *wqm_item_views(UITabBar *bar) {
         bar.alpha = 1.0;
         bar.userInteractionEnabled = YES;
     }
+}
+
+- (void)applyTabBarHidden {
+    UITabBar *bar = self.tabBar;
+    NSHashTable<UITabBar *> *touched = self.touchedTabBars;
+
+    if (self.tabBarHidden) {
+        /* 记下这条 bar：视图重建换实例后，退出时也要能把经手过的都放回来。 */
+        if (bar) {
+            [touched addObject:bar];
+            [self applyHidden:YES toBar:bar];
+        }
+        return;
+    }
+
+    /*
+     * 复位要幂等且全量：所有经手过的 bar 都放回来，外加当前 self.tabBar
+     * （可能是刚重建、还没进过集合的新实例）。只改当前对象会留下旧 bar 透明 ——
+     * 这正是"冷启动后主页底栏消失"能残留下去的最后一环。
+     */
+    if (bar) [self applyHidden:NO toBar:bar];
+    for (UITabBar *touchedBar in touched) {
+        if (touchedBar && touchedBar != bar) {
+            [self applyHidden:NO toBar:touchedBar];
+        }
+    }
+    [touched removeAllObjects];
 }
 
 - (void)applyItemViewSelection {
