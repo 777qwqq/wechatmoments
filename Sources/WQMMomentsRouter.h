@@ -11,8 +11,8 @@
  *       └─ WQMMomentsHost(UINavigationController)  ← 只在这一层里压栈
  *             └─ 朋友圈时间线 → 详情/图片/评论 ...
  *
- * 因为朋友圈挂在 tab 容器上而不是任何一个 tab 的导航栈里，"返回"天然只会退出这一层，
- * 落到用户原来的消息主页；而时间线内部的二级页面仍然由 UINavigationController 逐级 pop。
+ * 因为朋友圈挂在 tab 容器上而不是任何一个 tab 的导航栈里，"返回"天然只会退出这一层；
+ * 退出时统一把 selectedIndex 归到「微信」消息主页，时间线内部的二级页面照常逐级 pop。
  */
 @interface WQMMomentsRouter : NSObject
 
@@ -29,8 +29,6 @@
 - (BOOL)ownsViewController:(UIViewController *)viewController;
 
 - (void)noteViewControllerAppeared:(UIViewController *)viewController;
-- (void)notePushedController:(UIViewController *)viewController
-      navigationController:(UINavigationController *)navigationController;
 - (void)handleTabSwitchToIndex:(NSUInteger)index;
 
 /* 微信改动了导航栏可见性之后重新确认一次返回项。 */

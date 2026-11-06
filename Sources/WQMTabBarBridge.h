@@ -58,7 +58,5 @@
 - (UIView *)discoverItemView;
 - (BOOL)discoverBadgeVisible;
 - (long long)discoverUnreadCount;
-/* 数字红点的文本；纯小圆点时为空。 */
-- (NSString *)discoverBadgeString;
 
 @end

@@ -13,11 +13,6 @@ static void check(const char *name, long actual, long expected) {
     }
 }
 
-static int after(int total, int moments) {
-    WQMBadgeInput in = { total, moments };
-    return wqm_badge_total_after_moments_read(in);
-}
-
 int main(void) {
     printf("[badge] 解析\n");
     check("nil -> 0", wqm_badge_parse_text(NULL), 0);
@@ -27,15 +22,8 @@ int main(void) {
     check("\"99+\" -> 99", wqm_badge_parse_text("99+"), 99);
     check("\" 2 \" -> 2", wqm_badge_parse_text(" 2 "), 2);
     check("\"abc\" -> 1", wqm_badge_parse_text("abc"), 1);
-
-    printf("[badge] 只扣朋友圈那部分\n");
-    check("5 unread, 2 from moments -> 3", after(5, 2), 3);
-    check("2 unread, 2 from moments -> 0", after(2, 2), 0);
-    check("2 unread, 5 from moments -> 0 (clamp)", after(2, 5), 0);
-    check("5 unread, moments=0 -> untouched", after(5, 0), 5);
-    check("5 unread, moments unknown -> 4", after(5, -1), 4);
-    check("1 unread, moments unknown -> 0", after(1, -1), 0);
-    check("0 unread -> 0", after(0, 3), 0);
+    check("\"0\" -> 0", wqm_badge_parse_text("0"), 0);
+    check("overflow clamps to 9999", wqm_badge_parse_text("99999"), 9999);
 
     printf("[badge] 陈旧回灌拦截\n");
     WQMBadgeLedger ledger;
@@ -46,6 +34,20 @@ int main(void) {
     check("zero always allowed", wqm_badge_ledger_should_drop(&ledger, 0, 1.0), 0);
     check("stale 3 at t=6.5 expired", wqm_badge_ledger_should_drop(&ledger, 3, 6.5), 0);
     check("ledger deactivated after expiry", ledger.active, 0);
+
+    printf("[badge] 小圆点场景（ceiling=1）\n");
+    WQMBadgeLedger dot;
+    wqm_badge_ledger_open(&dot, 1, 0.0, 5.0);
+    check("dot ledger active", dot.active, 1);
+    check("stale 1 at t=1 dropped", wqm_badge_ledger_should_drop(&dot, 1, 1.0), 1);
+    check("stale 1 at t=6.5 expired", wqm_badge_ledger_should_drop(&dot, 1, 6.5), 0);
+
+    printf("[badge] 窗口不因命中而续期\n");
+    WQMBadgeLedger repeated;
+    wqm_badge_ledger_open(&repeated, 3, 0.0, 5.0);
+    check("first hit dropped", wqm_badge_ledger_should_drop(&repeated, 3, 1.0), 1);
+    check("second hit dropped", wqm_badge_ledger_should_drop(&repeated, 3, 2.0), 1);
+    check("t=6.5 expired despite hits", wqm_badge_ledger_should_drop(&repeated, 3, 6.5), 0);
 
     WQMBadgeLedger empty;
     wqm_badge_ledger_open(&empty, 0, 0.0, 5.0);

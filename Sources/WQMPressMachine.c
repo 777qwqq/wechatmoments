@@ -7,7 +7,6 @@ void wqm_press_reset(WQMPressMachine *m) {
     if (!m) return;
     m->phase = WQMPressPhaseIdle;
     m->startedAt = 0.0;
-    m->touchCount = 0;
 }
 
 void wqm_press_init(WQMPressMachine *m, double holdDelay) {
@@ -15,7 +14,6 @@ void wqm_press_init(WQMPressMachine *m, double holdDelay) {
     m->phase = WQMPressPhaseIdle;
     m->startedAt = 0.0;
     m->holdDelay = (holdDelay > 0.0) ? holdDelay : WQM_PRESS_DEFAULT_HOLD;
-    m->touchCount = 0;
 }
 
 WQMPressOutcome wqm_press_down(WQMPressMachine *m, int insideSlot, double now) {
@@ -35,7 +33,6 @@ WQMPressOutcome wqm_press_down(WQMPressMachine *m, int insideSlot, double now) {
 
     m->phase = WQMPressPhasePending;
     m->startedAt = now;
-    m->touchCount = 1;
     return WQMPressOutcomeNone;
 }
 
@@ -70,6 +67,7 @@ WQMPressOutcome wqm_press_up(WQMPressMachine *m, double now) {
             outcome = WQMPressOutcomeTap;
         }
     } else if (m->phase == WQMPressPhaseHeld) {
+        /* 兜底：识别器正常路径已在定时器里消费本轮，这里只为纯函数完整性保留。 */
         outcome = WQMPressOutcomeLongPress;
     }
 

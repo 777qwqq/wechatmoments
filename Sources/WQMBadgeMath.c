@@ -18,27 +18,6 @@ int wqm_badge_parse_text(const char *text) {
     return value;
 }
 
-int wqm_badge_total_after_moments_read(WQMBadgeInput input) {
-    if (input.currentTotal <= 0) return 0;
-
-    if (input.momentsUnread > 0) {
-        int remaining = input.currentTotal - input.momentsUnread;
-        return remaining > 0 ? remaining : 0;
-    }
-
-    if (input.momentsUnread == 0) {
-        /* 本来就没有朋友圈未读，别动汇总点。 */
-        return input.currentTotal;
-    }
-
-    /* 未知子项分解：保守策略，绝不整体清零。 */
-    if (input.currentTotal == 1) {
-        /* 只有一个未读时，它几乎必然来自朋友圈（本次进入的唯一触发源）。 */
-        return 0;
-    }
-    return input.currentTotal - 1;
-}
-
 void wqm_badge_ledger_open(WQMBadgeLedger *ledger, int totalBefore, double now, double window) {
     if (!ledger) return;
     ledger->active = (totalBefore > 0) ? 1 : 0;
@@ -66,6 +45,6 @@ int wqm_badge_ledger_should_drop(WQMBadgeLedger *ledger, int incomingTotal, doub
      */
     if (incomingTotal < ledger->ceiling) return 0;
 
-    ledger->clearedAt = now;
+    /* 命中后不刷新 clearedAt：窗口从首次清除起算，不允许被周期性回灌无限续期。 */
     return 1;
 }

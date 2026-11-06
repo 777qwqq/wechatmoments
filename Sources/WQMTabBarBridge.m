@@ -473,20 +473,6 @@ static NSArray *wqm_item_views(UITabBar *bar) {
     return self.discoverItem.badgeValue.integerValue;
 }
 
-- (NSString *)discoverBadgeString {
-    UIView *itemView = [self discoverItemView];
-    if (itemView) {
-        NSString *badge = nil;
-        @try {
-            badge = [itemView valueForKey:@"badgeString"];
-        } @catch (NSException *exception) {
-            badge = nil;
-        }
-        if ([badge isKindOfClass:[NSString class]] && badge.length) return badge;
-    }
-    return self.discoverItem.badgeValue;
-}
-
 - (BOOL)discoverBadgeVisible {
     UIView *itemView = [self discoverItemView];
     if (!itemView) return self.discoverItem.badgeValue.length > 0;

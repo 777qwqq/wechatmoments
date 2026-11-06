@@ -36,6 +36,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Unit Tests
+        run: make -C Tests test
+
       - name: Setup Environment
         run: |
           echo "$THEOS/bin" >> "$GITHUB_PATH"

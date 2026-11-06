@@ -40,6 +40,8 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 @property (nonatomic) BOOL exiting;
 @property (nonatomic) BOOL badgeClearedForSession;
 @property (nonatomic) BOOL edgeSwipeTriggered;
+/* 每轮进入自增，用来让上一轮挂起的延时 block 自动失效。 */
+@property (nonatomic) NSUInteger sessionGeneration;
 @property (nonatomic, strong) UINavigationController *hostNavigation;
 @property (nonatomic, weak) UITabBarController *hostParent;
 @property (nonatomic, strong) UIViewController *momentsController;
@@ -50,6 +52,9 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
 @property (nonatomic) BOOL hasDiscoverInTimelineSnapshot;
 /* 朋友圈 delegate 的中间人：转发给微信原对象，同时把已读回调喂给发现页。 */
 @property (nonatomic, strong) WQMDelegateProxy *delegateProxy;
+/* 进入前的原始 delegate 与"是否真的替换过"，退出时按它还原。 */
+@property (nonatomic, weak) id originalDelegate;
+@property (nonatomic) BOOL delegateWasSwapped;
 /* 已经被我们挂过手势的原生返回视图，避免重复添加。 */
 @property (nonatomic, weak) UIView *hijackedBackView;
 /*
@@ -174,6 +179,7 @@ static UIImage *wqm_chevron_image(CGFloat size, CGFloat lineWidth) {
     self.hostNavigation = navigationController;
     self.hostParent = host;
     self.momentsController = controller;
+    self.sessionGeneration += 1;
     self.showing = YES;
     self.badgeClearedForSession = NO;
     self.presentedAt = CACurrentMediaTime();
@@ -393,6 +399,9 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     if (!discover) return NULL;
     Ivar ivar = class_getInstanceVariable(object_getClass(discover), "m_inTimeline");
     if (!ivar) return NULL;
+    /* 只接受 1 字节布尔 ivar；微信换类型时宁可不写，也不要按错误的宽度改内存。 */
+    const char *type = ivar_getTypeEncoding(ivar);
+    if (!type || (type[0] != 'B' && type[0] != 'c' && type[0] != 'C')) return NULL;
     return (BOOL *)((char *)(__bridge void *)discover + ivar_getOffset(ivar));
 }
 
@@ -423,11 +432,15 @@ static BOOL *wqm_in_timeline_slot(id discover) {
         WQMDelegateProxy *proxy = (WQMDelegateProxy *)current;
         proxy.observer = discover;
         self.delegateProxy = proxy;
+        self.delegateWasSwapped = YES;
     } else {
+        /* 只把"非 proxy"的当前值记为原始 delegate，避免复用时把自己记进去。 */
+        self.originalDelegate = current;
         WQMDelegateProxy *proxy = [WQMDelegateProxy proxyWithTarget:current observer:discover];
         self.delegateProxy = proxy;
         @try {
             [self.momentsController setValue:proxy forKey:@"delegate"];
+            self.delegateWasSwapped = YES;
             WQMLog(@"delegate -> proxy (target %@)",
                    current ? NSStringFromClass([current class]) : @"nil");
         } @catch (NSException *exception) {
@@ -451,10 +464,20 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     UIViewController *discover = [[WQMTabBarBridge shared] discoverController];
 
     /*
-     * delegate 从头到尾没动过，这里只还原 m_inTimeline。
-     * 原生朋友圈的 delegate 会一直连着发现页，实例复用期间保持连接才能让
-     * 下一次进入的已读结算继续生效。
+     * 已读结算（momentsTimelineWillDisappear）已经先跑过，这里把这一轮改过的
+     * delegate 与 m_inTimeline 都还原：retainedTimeline 会被复用，也会走微信原生路径，
+     * 留着 proxy 会让"长按进发现页再点朋友圈"拿到一个被插件改过的实例。
      */
+    if (self.delegateWasSwapped) {
+        @try {
+            [self.momentsController setValue:self.originalDelegate forKey:@"delegate"];
+        } @catch (NSException *exception) {
+            /* 版本改了 setter 就跳过，不让还原失败影响退出 */
+        }
+    }
+    self.delegateWasSwapped = NO;
+    self.originalDelegate = nil;
+    self.delegateProxy = nil;
 
     if (discover && self.hasDiscoverInTimelineSnapshot) {
         BOOL *slot = wqm_in_timeline_slot(discover);
@@ -561,10 +584,12 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 #pragma mark - 红点
 
 - (void)scheduleBadgeClear {
+    NSUInteger generation = self.sessionGeneration;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
+        if (!self || self.sessionGeneration != generation) return;
         if (!self.showing || !self.hostNavigation) return;
         WQMLog(@"post-entry chrome: navBarHidden=%d stack=%lu",
                self.hostNavigation.navigationBarHidden,
@@ -583,10 +608,12 @@ static BOOL *wqm_in_timeline_slot(id discover) {
 
 /* 自检：VC 起来了却没挂到窗口上，说明这类实例化方式在真机上不可用，及时退出。 */
 - (void)verifyPresentation {
+    NSUInteger generation = self.sessionGeneration;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.sessionGeneration != generation) return;
         if (!strongSelf.showing || !strongSelf.momentsController) return;
         UIView *view = strongSelf.momentsController.view;
         if (!view.window) {
@@ -604,6 +631,8 @@ static BOOL *wqm_in_timeline_slot(id discover) {
     if (!self.showing || self.exiting) return;
     self.exiting = YES;
     self.showing = NO;
+    /* 让上一轮挂起的延时 block 全部失效，避免它们落到下一次进入上。 */
+    self.sessionGeneration += 1;
 
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     UITabBarController *host = self.hostParent;
@@ -693,28 +722,18 @@ static BOOL *wqm_in_timeline_slot(id discover) {
          * 朋友圈的 navigationItem 是它自己在 viewDidLoad / viewWillAppear 里拼的，
          * 有时我们第一次看的时候还没挂上去。晚一点再接管一次。
          */
+        NSUInteger generation = self.sessionGeneration;
         __weak typeof(self) weakSelf = self;
         for (NSNumber *delay in @[@0.3, @1.0]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                          (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) self = weakSelf;
-                if (!self.showing) return;
+                if (!self || self.sessionGeneration != generation || !self.showing) return;
                 [self ensureBackButton];
             });
         }
     }
-}
-
-- (void)notePushedController:(UIViewController *)viewController
-      navigationController:(UINavigationController *)navigationController {
-    /* 保留接口：真机诊断时可以用来观察朋友圈内部的导航行为。 */
-    if (!self.showing || navigationController != self.hostNavigation) return;
-    if (!viewController) return;
-
-    WQMLog(@"moments push -> %@ (stack %lu)",
-           NSStringFromClass(viewController.class),
-           (unsigned long)navigationController.viewControllers.count);
 }
 
 #pragma mark - 类名解析

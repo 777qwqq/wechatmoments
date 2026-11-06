@@ -23,6 +23,4 @@
 @property (nonatomic, copy) void (^onTap)(void);
 @property (nonatomic, copy) void (^onLongPress)(void);
 
-- (void)cancelCurrentGesture;
-
 @end

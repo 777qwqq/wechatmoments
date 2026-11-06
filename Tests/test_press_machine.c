@@ -23,10 +23,12 @@ int main(void) {
     check("up at 0.12s -> tap", wqm_press_up(&m, 0.120), WQMPressOutcomeTap);
     check("up twice does nothing", wqm_press_up(&m, 0.130), WQMPressOutcomeNone);
 
-    printf("[press] 长按\n");
+    /* 识别器在定时器里已立即跳转；这里只验证状态机自身的兜底语义。 */
+    printf("[press] 长按（状态机兜底路径）\n");
     wqm_press_init(&m, 0.40);
     wqm_press_down(&m, 1, 0.000);
     check("armed at 0.41s", wqm_press_hold_elapsed(&m, 0.410), 1);
+    check("phase held after arm", m.phase, WQMPressPhaseHeld);
     check("armed only once", wqm_press_hold_elapsed(&m, 0.500), 0);
     check("up after arm -> long press", wqm_press_up(&m, 0.900), WQMPressOutcomeLongPress);
 

@@ -50,11 +50,10 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 - (void)holdTimerFired {
     if (self.state != UIGestureRecognizerStatePossible) return;
 
+    /* 返回 1 即长按成立，立刻跳转，不等抬手；状态机的 up 只是定时器被卡住时的兜底。 */
     if (!wqm_press_hold_elapsed(&_machine, CACurrentMediaTime())) return;
 
     /*
-     * 时间一到就直接跳，不等抬手。
-     *
      * 抬手会不会误触发现页九宫格？不会：这次触摸在 touchesBegan 时就落给了底栏，
      * UIKit 不会对进行中的触摸重新做 hit-test，所以手指下面是哪一格都跟它没关系。
      * 底栏自己的 singleTapGesture 又被我们要求 fail，也不会补一次 tab 切换。
@@ -100,10 +99,8 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if (self.state != UIGestureRecognizerStatePossible &&
-        self.state != UIGestureRecognizerStateBegan) {
-        return;
-    }
+    /* 本识别器不进入持续态，Possible 之外不会有跟手移动需要处理。 */
+    if (self.state != UIGestureRecognizerStatePossible) return;
 
     UITouch *touch = touches.anyObject;
     if (!touch) return;
@@ -115,9 +112,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
 
     if (wqm_press_drag(&_machine, insideSlop ? 1 : 0, CACurrentMediaTime()) == WQMPressOutcomeAbort) {
         [self stopHoldTimer];
-        self.state = (self.state == UIGestureRecognizerStateBegan)
-                         ? UIGestureRecognizerStateCancelled
-                         : UIGestureRecognizerStateFailed;
+        self.state = UIGestureRecognizerStateFailed;
     }
 }
 
@@ -125,9 +120,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
     [self stopHoldTimer];
 
     /* 长按已经在定时器里发过了，这里只收尾，不能再触发一次。 */
-    if (_longPressFired) {
-        return;
-    }
+    if (_longPressFired) return;
 
     WQMPressOutcome outcome = wqm_press_up(&_machine, CACurrentMediaTime());
 
@@ -144,15 +137,14 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
             break;
         }
         case WQMPressOutcomeLongPress: {
+            /* 定时器被主线程卡住时的兜底：以真实按住时长判定。 */
             self.state = UIGestureRecognizerStateEnded;
             WQMLog(@"long press");
             if (self.onLongPress) self.onLongPress();
             break;
         }
         default: {
-            self.state = (self.state == UIGestureRecognizerStateBegan)
-                             ? UIGestureRecognizerStateCancelled
-                             : UIGestureRecognizerStateFailed;
+            self.state = UIGestureRecognizerStateFailed;
             break;
         }
     }
@@ -162,18 +154,7 @@ static const CGFloat kWQMDragSlopInPoints = 14.0;
     [self stopHoldTimer];
     wqm_press_cancel(&_machine);
     if (_longPressFired) return;
-    self.state = (self.state == UIGestureRecognizerStateBegan)
-                     ? UIGestureRecognizerStateCancelled
-                     : UIGestureRecognizerStateFailed;
-}
-
-- (void)cancelCurrentGesture {
-    [self stopHoldTimer];
-    wqm_press_reset(&_machine);
-    if (self.state == UIGestureRecognizerStatePossible ||
-        self.state == UIGestureRecognizerStateBegan) {
-        self.state = UIGestureRecognizerStateCancelled;
-    }
+    self.state = UIGestureRecognizerStateFailed;
 }
 
 - (void)reset {

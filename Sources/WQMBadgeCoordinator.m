@@ -1,3 +1,4 @@
+#include <limits.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #import "WQMBadgeCoordinator.h"
@@ -9,9 +10,9 @@
 static const double kWQMBadgeLedgerWindow = 5.0;
 
 @interface WQMBadgeCoordinator ()
-@property (nonatomic) BOOL writing;
-@property (nonatomic, weak) UIViewController *timelineController;
 @property (nonatomic) NSInteger clearAttempts;
+/* 每轮进入自增，让上一轮挂起的重试 block 自动失效。 */
+@property (nonatomic) NSUInteger clearGeneration;
 @property (nonatomic) WQMBadgeLedger ledger;
 @end
 
@@ -37,36 +38,6 @@ static BOOL wqm_invoke_noarg(id target, NSString *selectorName) {
     return YES;
 }
 
-/* 读取一个返回整型的方法，用于拿到"朋友圈未读数"（拿不到就返回 NO）。 */
-static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outValue) {
-    if (!target || selectorName.length == 0) return NO;
-
-    SEL selector = NSSelectorFromString(selectorName);
-    if (![target respondsToSelector:selector]) return NO;
-
-    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    if (!signature || signature.numberOfArguments != 2) return NO;
-    if (signature.methodReturnLength != sizeof(NSInteger) &&
-        signature.methodReturnLength != sizeof(int) &&
-        signature.methodReturnLength != sizeof(long)) {
-        return NO;
-    }
-
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    invocation.target = target;
-    invocation.selector = selector;
-    @try {
-        [invocation invoke];
-    } @catch (NSException *exception) {
-        return NO;
-    }
-
-    NSInteger value = 0;
-    [invocation getReturnValue:&value];
-    if (outValue) *outValue = value;
-    return YES;
-}
-
 @implementation WQMBadgeCoordinator
 
 + (instancetype)shared {
@@ -81,8 +52,9 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 #pragma mark - 对外
 
 - (void)momentsTimelineDidAppear:(UIViewController *)timelineController {
-    self.timelineController = timelineController;
+    (void)timelineController;
     self.clearAttempts = 0;
+    self.clearGeneration += 1;
     [self runBadgeClearAttempt];
 }
 
@@ -101,12 +73,10 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 /*
  * 走微信自己的结算，不自己算数字。
  *
- * 前提（WQMMomentsRouter 已经做好）：timeline.delegate = 发现页、发现页 m_inTimeline = YES。
- * 有了这两样，朋友圈加载完数据后会自己回调 onMarkWCObjectAsRead:，
- * 发现页据此把"已读位置"落到本地存储 —— 所以冷启动不会再回来。
- *
- * 这里只负责"催一下"：如果朋友圈的异步回调还没到，就用发现页自己的
- * onTimeLineViewReturn 让它按当前状态重算一次；再不行才动显示层。
+ * 前提（WQMMomentsRouter 已经做好）：timeline.delegate 指向 proxy（已读回调额外喂给发现页）、
+ * 发现页 m_inTimeline = YES。有了这两样，朋友圈加载完数据后会自己完成已读落库。
+ * 这里只负责"催一下"：异步回调没到就用发现页的 onTimeLineViewReturn 重算，
+ * 再不行才动显示层。
  */
 - (void)runBadgeClearAttempt {
     if (self.clearAttempts >= 3) {
@@ -114,6 +84,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
         return;
     }
     self.clearAttempts += 1;
+    NSUInteger generation = self.clearGeneration;
 
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     [bridge refresh];
@@ -133,7 +104,7 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
+        if (!self || self.clearGeneration != generation) return;
         if (![[WQMTabBarBridge shared] discoverBadgeVisible]) {
             WQMLog(@"badge cleared by WeChat itself");
             return;
@@ -150,15 +121,11 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
-            if (!self) return;
+            if (!self || self.clearGeneration != generation) return;
             if (![[WQMTabBarBridge shared] discoverBadgeVisible]) {
                 return;
             }
-            /*
-             * 最后一轮：微信的结算链路没走到（版本改了内部方法时常见），
-             * 直接把发现页这一格的红点压掉。视频号 / 直播的真实未读
-             * 会在微信下一次汇总时重新点回来，不会被永久抹掉。
-             */
+            /* 微信的结算链路没走到（版本改了内部方法时常见），最后压一次显示层。 */
             if (self.clearAttempts >= 2) {
                 [self removeDiscoverRedDot:before];
             }
@@ -166,7 +133,9 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                              (int64_t)(1.2 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
-                    [weakSelf runBadgeClearAttempt];
+                    __strong typeof(weakSelf) strongSelf = weakSelf;
+                    if (!strongSelf || strongSelf.clearGeneration != generation) return;
+                    [strongSelf runBadgeClearAttempt];
                 });
             }
         });
@@ -210,9 +179,8 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 /*
- * 三级兜底：调用 MMTabBarController 自己的"移除该 tab 红点"。
- * 前两级已经把朋友圈这一项的已读状态结算掉了，这里清的是显示层；
- * 若视频号 / 直播确实还有未读，微信下一次汇总会把点重新点回来。
+ * 三级兜底：只调微信自己的显示层接口，绝不写 unreadCount / badgeString 这类内部计数
+ * —— 那一格是子项汇总，写 0 会把视频号 / 直播的未读一起抹掉。
  */
 - (BOOL)removeDiscoverRedDot:(int)before {
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
@@ -241,12 +209,6 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
                 /* 忽略 */
             }
         }
-        @try {
-            [itemView setValue:@0 forKey:@"unreadCount"];
-            [itemView setValue:nil forKey:@"badgeString"];
-        } @catch (NSException *exception) {
-            /* 只读字段就跳过 */
-        }
     }
 
     [self openLedgerFrom:before];
@@ -254,12 +216,11 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 - (void)openLedgerFrom:(int)before {
-    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), kWQMBadgeLedgerWindow);
+    /* 纯小圆点没有计数：传 1 才能激活窗口，否则最常见的红点形态反而不拦截。 */
+    wqm_badge_ledger_open(&_ledger, MAX(1, before), CACurrentMediaTime(), kWQMBadgeLedgerWindow);
 }
 
 - (NSString *)adjustedBadgeValue:(NSString *)value forItem:(UITabBarItem *)item {
-    if (self.writing) return value;
-
     UITabBarItem *discoverItem = [WQMTabBarBridge shared].discoverItem;
     if (!discoverItem || item != discoverItem) return value;
 
@@ -272,8 +233,6 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 - (NSString *)adjustedBadgeString:(id)value forIndex:(NSUInteger)index {
-    if (self.writing) return value;
-
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     if (index == NSUIntegerMax || index != bridge.discoverIndex) return value;
     if (![value isKindOfClass:[NSString class]]) return value;
@@ -288,75 +247,14 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
 }
 
 - (BOOL)shouldAcceptBadgeValue:(long long)value forIndex:(NSUInteger)index {
-    if (self.writing) return YES;
-
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
     if (index == NSUIntegerMax || index != bridge.discoverIndex) return YES;
 
-    return !wqm_badge_ledger_should_drop(&_ledger, (int)value, CACurrentMediaTime());
+    int incoming = (int)MIN(value, (long long)INT_MAX);
+    return !wqm_badge_ledger_should_drop(&_ledger, incoming, CACurrentMediaTime());
 }
 
-#pragma mark - 写入
-
-- (void)applyTotal:(int)after toItem:(UITabBarItem *)item previous:(int)before moments:(NSInteger)moments {
-    NSString *newValue = (after > 0) ? [NSString stringWithFormat:@"%d", after] : nil;
-
-    self.writing = YES;
-    [self writeDiscoverBadgeString:newValue fallbackItem:item];
-    self.writing = NO;
-
-    wqm_badge_ledger_open(&_ledger, before, CACurrentMediaTime(), kWQMBadgeLedgerWindow);
-
-    WQMLog(@"badge %d -> %@ (moments unread %ld, window %.1fs)",
-           before, newValue ?: @"nil", (long)moments, kWQMBadgeLedgerWindow);
-}
-
-/* 微信真实底栏只认 MMTabBarItemView，优先走它自己的写入接口。 */
-- (void)writeDiscoverBadgeString:(NSString *)value fallbackItem:(UITabBarItem *)item {
-    WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
-    UITabBarController *controller = bridge.tabBarController;
-    NSUInteger index = bridge.discoverIndex;
-
-    SEL stringSelector = NSSelectorFromString(@"setTabBarBadgeString:forIndex:");
-    if (controller && index != NSUIntegerMax && [controller respondsToSelector:stringSelector]) {
-        ((void (*)(id, SEL, id, unsigned long long))objc_msgSend)(
-            controller, stringSelector, value, (unsigned long long)index);
-        return;
-    }
-
-    SEL valueSelector = NSSelectorFromString(@"setTabBarBadgeValue:forIndex:");
-    if (controller && index != NSUIntegerMax && [controller respondsToSelector:valueSelector]) {
-        ((void (*)(id, SEL, unsigned long long, unsigned long long))objc_msgSend)(
-            controller, valueSelector, (unsigned long long)MAX(0, value.integerValue),
-            (unsigned long long)index);
-        return;
-    }
-
-    item.badgeValue = value;
-}
-
-#pragma mark - 数据源
-
-- (BOOL)clearMomentsUnreadAtSource:(UIViewController *)timelineController {
-    if (!timelineController) return NO;
-
-    /* 各版本清未读的入口名不一样，挨个试，命中即止。 */
-    NSArray<NSString *> *selectors = @[
-        @"markAllAsRead",
-        @"markTimelineAsRead",
-        @"clearUnread",
-        @"resetUnreadCount"
-    ];
-
-    BOOL cleared = NO;
-    for (NSString *selector in selectors) {
-        if (wqm_invoke_noarg(timelineController, selector)) {
-            WQMLog(@"cleared moments unread via -%@", selector);
-            cleared = YES;
-        }
-    }
-    return cleared;
-}
+#pragma mark - 汇总重算
 
 - (BOOL)requestAggregateRecompute {
     WQMTabBarBridge *bridge = [WQMTabBarBridge shared];
@@ -376,15 +274,6 @@ static BOOL wqm_read_integer(id target, NSString *selectorName, NSInteger *outVa
         if (wqm_invoke_noarg([bridge discoverController], selector)) done = YES;
     }
     return done;
-}
-
-- (BOOL)readMomentsUnreadFrom:(UIViewController *)controller outValue:(NSInteger *)outValue {
-    if (!controller) return NO;
-    NSArray<NSString *> *selectors = @[@"unreadCount", @"snsUnreadCount", @"newUnreadCount", @"badgeCount"];
-    for (NSString *selector in selectors) {
-        if (wqm_read_integer(controller, selector, outValue)) return YES;
-    }
-    return NO;
 }
 
 @end
